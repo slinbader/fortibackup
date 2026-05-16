@@ -33,6 +33,11 @@ pub struct GlobalConfig {
     pub retention_min_copies: u32,
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    /// When `true`, stored backups are gzip-compressed on disk (`.conf.gz`).
+    /// The hash and metadata sidecar still reflect the *uncompressed*
+    /// content, so no_change detection survives compression toggles.
+    #[serde(default)]
+    pub compress: bool,
 }
 
 const fn default_retention_days() -> u32 {

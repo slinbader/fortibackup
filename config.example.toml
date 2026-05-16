@@ -9,6 +9,10 @@ backup_dir = "/var/lib/fortibackup"
 retention_days = 90
 retention_min_copies = 7
 log_level = "info"
+# When true, stored configs are gzip-compressed (.conf.gz). FortiGate
+# configs are mostly text and shrink ~10x. The sidecar JSON always stores
+# the plaintext SHA-256 so no_change detection works regardless.
+compress = false
 
 [notifications]
 on_failure = ["email", "webhook"]

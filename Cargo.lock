@@ -726,6 +726,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap",
+ "flate2",
  "futures",
  "hex",
  "humantime",

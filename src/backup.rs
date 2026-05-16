@@ -114,6 +114,7 @@ async fn execute(cfg: &Config, device: &Device) -> Result<PipelineOutcome, Backu
         &device.name,
         method_label(device.method),
         &artifact,
+        cfg.global.compress,
     )?;
 
     match storage::apply_retention(

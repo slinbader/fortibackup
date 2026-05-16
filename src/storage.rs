@@ -8,14 +8,21 @@
 //!     2026-05-16_020000.json   # sidecar metadata
 //! ```
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, NaiveDateTime, Utc};
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::StorageError;
 use crate::transport::BackupArtifact;
+
+/// Filename extension used when compression is enabled.
+const COMPRESSED_EXT: &str = "conf.gz";
+const PLAIN_EXT: &str = "conf";
 
 /// Sidecar metadata stored alongside each `.conf` backup file.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -23,11 +30,16 @@ pub struct BackupMetadata {
     pub device: String,
     pub hostname: String,
     pub fetched_at: DateTime<Utc>,
+    /// Plaintext content size, regardless of on-disk compression.
     pub size_bytes: u64,
+    /// SHA-256 of the **plaintext** content (not the compressed blob).
     pub sha256: String,
     pub firmware_version: Option<String>,
     pub serial: Option<String>,
     pub transport: String,
+    /// `true` when the `.conf` file is stored gzip-compressed (`.conf.gz`).
+    #[serde(default)]
+    pub compressed: bool,
 }
 
 /// Result of saving (or skipping) a backup.
@@ -95,6 +107,7 @@ pub fn save_backup(
     device_name: &str,
     transport_label: &str,
     artifact: &BackupArtifact,
+    compress: bool,
 ) -> Result<SaveOutcome, StorageError> {
     let dir = device_dir(backup_dir, device_name);
     std::fs::create_dir_all(&dir).map_err(|e| io_err(&dir, e))?;
@@ -118,10 +131,16 @@ pub fn save_backup(
     }
 
     let stem = artifact.fetched_at.format("%Y-%m-%d_%H%M%S").to_string();
-    let conf_path = dir.join(format!("{stem}.conf"));
+    let ext = if compress { COMPRESSED_EXT } else { PLAIN_EXT };
+    let conf_path = dir.join(format!("{stem}.{ext}"));
     let meta_path = dir.join(format!("{stem}.json"));
 
-    std::fs::write(&conf_path, &artifact.content).map_err(|e| io_err(&conf_path, e))?;
+    if compress {
+        let bytes = gzip_bytes(&artifact.content)?;
+        std::fs::write(&conf_path, &bytes).map_err(|e| io_err(&conf_path, e))?;
+    } else {
+        std::fs::write(&conf_path, &artifact.content).map_err(|e| io_err(&conf_path, e))?;
+    }
 
     let metadata = BackupMetadata {
         device: device_name.to_owned(),
@@ -132,6 +151,7 @@ pub fn save_backup(
         firmware_version: artifact.firmware_version.clone(),
         serial: artifact.serial.clone(),
         transport: transport_label.to_owned(),
+        compressed: compress,
     };
     let meta_json = serde_json::to_vec_pretty(&metadata)?;
     std::fs::write(&meta_path, meta_json).map_err(|e| io_err(&meta_path, e))?;
@@ -141,6 +161,44 @@ pub fn save_backup(
         path: conf_path,
         sha256: hash,
     })
+}
+
+fn gzip_bytes(content: &[u8]) -> Result<Vec<u8>, StorageError> {
+    let mut enc = GzEncoder::new(Vec::with_capacity(content.len() / 4), Compression::default());
+    enc.write_all(content).map_err(|e| StorageError::Io {
+        path: PathBuf::from("<gzip>"),
+        source: e,
+    })?;
+    enc.finish().map_err(|e| StorageError::Io {
+        path: PathBuf::from("<gzip>"),
+        source: e,
+    })
+}
+
+/// Path is recognized as a stored backup if its extension is `.conf` or
+/// `.conf.gz`. Returns `Some((stem, compressed))` or `None`.
+fn classify_backup_filename(path: &Path) -> Option<(String, bool)> {
+    let name = path.file_name()?.to_str()?;
+    if let Some(stem) = name.strip_suffix(".conf.gz") {
+        Some((stem.to_owned(), true))
+    } else {
+        name.strip_suffix(".conf").map(|s| (s.to_owned(), false))
+    }
+}
+
+fn sidecar_path_for(backup_path: &Path) -> PathBuf {
+    let parent = backup_path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = classify_backup_filename(backup_path).map_or_else(
+        || {
+            backup_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("backup")
+                .to_owned()
+        },
+        |(s, _)| s,
+    );
+    parent.join(format!("{stem}.json"))
 }
 
 /// List backup entries for a single device, oldest first.
@@ -161,23 +219,25 @@ pub fn list_entries_for_device(
     for entry in read {
         let entry = entry.map_err(|e| io_err(&dir, e))?;
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("conf") {
+        let Some((stem, compressed)) = classify_backup_filename(&path) else {
             continue;
-        }
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| StorageError::InvalidFilename(path.display().to_string()))?;
-        let created_at = parse_timestamp_from_stem(stem)
-            .ok_or_else(|| StorageError::InvalidFilename(stem.to_owned()))?;
+        };
+        let created_at = parse_timestamp_from_stem(&stem)
+            .ok_or_else(|| StorageError::InvalidFilename(stem.clone()))?;
         let size = path.metadata().map_err(|e| io_err(&path, e))?.len();
-        let sidecar = path.with_extension("json");
+        let sidecar = sidecar_path_for(&path);
         let sha256 = if sidecar.exists() {
             let raw = std::fs::read(&sidecar).map_err(|e| io_err(&sidecar, e))?;
             let meta: BackupMetadata = serde_json::from_slice(&raw)?;
             meta.sha256
+        } else if compressed {
+            // Without a sidecar we cannot recover the plaintext hash from a
+            // compressed file without decompressing — fall back to the hash
+            // of the compressed bytes (best effort, only used in absence of
+            // metadata).
+            let raw = std::fs::read(&path).map_err(|e| io_err(&path, e))?;
+            sha256_hex(&raw)
         } else {
-            // Recompute hash if sidecar missing.
             let raw = std::fs::read(&path).map_err(|e| io_err(&path, e))?;
             sha256_hex(&raw)
         };
@@ -287,7 +347,7 @@ fn pick_victims(
 fn delete_victims(victims: &[BackupEntry]) -> Result<usize, StorageError> {
     for entry in victims {
         let conf = &entry.path;
-        let sidecar = conf.with_extension("json");
+        let sidecar = sidecar_path_for(conf);
         std::fs::remove_file(conf).map_err(|e| io_err(conf, e))?;
         if sidecar.exists() {
             std::fs::remove_file(&sidecar).map_err(|e| io_err(&sidecar, e))?;
@@ -326,14 +386,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let now = Utc::now();
         let a = art(b"config x\n", now);
-        let first = save_backup(dir.path(), "fgt-a", "api", &a).unwrap();
+        let first = save_backup(dir.path(), "fgt-a", "api", &a, false).unwrap();
         assert!(first.changed);
         assert!(first.path.exists());
         assert!(first.path.with_extension("json").exists());
 
         // Same content, slightly later — should be skipped.
         let b = art(b"config x\n", now + chrono::Duration::seconds(5));
-        let second = save_backup(dir.path(), "fgt-a", "api", &b).unwrap();
+        let second = save_backup(dir.path(), "fgt-a", "api", &b, false).unwrap();
         assert!(!second.changed);
         assert_eq!(first.sha256, second.sha256);
     }
@@ -343,10 +403,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let now = Utc::now();
         let a = art(b"v1\n", now);
-        save_backup(dir.path(), "fgt-a", "api", &a).unwrap();
+        save_backup(dir.path(), "fgt-a", "api", &a, false).unwrap();
 
         let b = art(b"v2 different\n", now + chrono::Duration::seconds(60));
-        let second = save_backup(dir.path(), "fgt-a", "api", &b).unwrap();
+        let second = save_backup(dir.path(), "fgt-a", "api", &b, false).unwrap();
         assert!(second.changed);
 
         let entries = list_entries_for_device(dir.path(), "fgt-a").unwrap();
@@ -418,10 +478,66 @@ mod tests {
             "fgt-a",
             "api",
             &art(b"first", base - chrono::Duration::seconds(100)),
+            false,
         )
         .unwrap();
-        save_backup(dir.path(), "fgt-a", "api", &art(b"second", base)).unwrap();
+        save_backup(dir.path(), "fgt-a", "api", &art(b"second", base), false).unwrap();
         let h = latest_hash(dir.path(), "fgt-a").unwrap().unwrap();
         assert_eq!(h, sha256_hex(b"second"));
+    }
+
+    #[test]
+    fn compressed_save_writes_gz_file_and_keeps_plaintext_hash() {
+        use flate2::read::GzDecoder;
+        use std::io::Read as _;
+
+        let dir = TempDir::new().unwrap();
+        let now = Utc::now();
+        // ~5 KB of repetitive text, gzip should be much smaller.
+        let body: Vec<u8> = std::iter::repeat(b"config-system global\n")
+            .take(256)
+            .flatten()
+            .copied()
+            .collect();
+        let plaintext_hash = sha256_hex(&body);
+
+        let outcome = save_backup(dir.path(), "fgt-a", "api", &art(&body, now), true).unwrap();
+        assert!(outcome.changed);
+        assert!(outcome.path.to_string_lossy().ends_with(".conf.gz"));
+
+        // Stored file is smaller than the original.
+        let on_disk = std::fs::metadata(&outcome.path).unwrap().len();
+        assert!(
+            (on_disk as usize) < body.len(),
+            "compressed file should shrink"
+        );
+
+        // Hash in outcome and sidecar must reflect the plaintext.
+        assert_eq!(outcome.sha256, plaintext_hash);
+        let sidecar = sidecar_path_for(&outcome.path);
+        let meta: BackupMetadata =
+            serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap();
+        assert_eq!(meta.sha256, plaintext_hash);
+        assert_eq!(meta.size_bytes, body.len() as u64);
+        assert!(meta.compressed);
+
+        // Round-trip through gunzip recovers original bytes.
+        let raw = std::fs::read(&outcome.path).unwrap();
+        let mut dec = GzDecoder::new(&raw[..]);
+        let mut out = Vec::new();
+        dec.read_to_end(&mut out).unwrap();
+        assert_eq!(out, body);
+
+        // Second run with identical content is detected as no_change even
+        // though gzip output is not deterministic byte-for-byte.
+        let again = save_backup(
+            dir.path(),
+            "fgt-a",
+            "api",
+            &art(&body, now + chrono::Duration::seconds(60)),
+            true,
+        )
+        .unwrap();
+        assert!(!again.changed);
     }
 }
