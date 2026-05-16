@@ -164,7 +164,10 @@ pub fn save_backup(
 }
 
 fn gzip_bytes(content: &[u8]) -> Result<Vec<u8>, StorageError> {
-    let mut enc = GzEncoder::new(Vec::with_capacity(content.len() / 4), Compression::default());
+    let mut enc = GzEncoder::new(
+        Vec::with_capacity(content.len() / 4),
+        Compression::default(),
+    );
     enc.write_all(content).map_err(|e| StorageError::Io {
         path: PathBuf::from("<gzip>"),
         source: e,
@@ -317,7 +320,12 @@ pub fn plan_retention(
     min_copies: u32,
 ) -> Result<Vec<BackupEntry>, StorageError> {
     let entries = list_entries_for_device(backup_dir, device_name)?;
-    Ok(pick_victims(entries, retention_days, min_copies, Utc::now()))
+    Ok(pick_victims(
+        entries,
+        retention_days,
+        min_copies,
+        Utc::now(),
+    ))
 }
 
 fn pick_victims(

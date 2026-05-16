@@ -80,6 +80,19 @@ pub async fn run_for_device(cfg: &Config, device: &Device) -> BackupReport {
         }
     };
 
+    let status_label = match report.status {
+        Status::Success => "success",
+        Status::NoChange => "no_change",
+        Status::Failed => "failed",
+    };
+    #[allow(clippy::cast_precision_loss)]
+    crate::metrics::record_outcome(
+        &report.device,
+        status_label,
+        (report.duration_ms as f64) / 1000.0,
+        report.bytes,
+    );
+
     let event = NotificationEvent {
         device: report.device.clone(),
         status: report.status,

@@ -60,6 +60,13 @@ humantime = "2.1.0"
 # Compression (optional opt-in for stored backups)
 flate2 = "1.0.34"
 
+# Prometheus metrics + minimal HTTP server for the /metrics endpoint
+prometheus = { version = "0.13.4", default-features = false }
+hyper = { version = "1.5.0", features = ["server", "http1"] }
+hyper-util = { version = "0.1.10", features = ["tokio"] }
+http-body-util = "0.1.2"
+bytes = "1.7.2"
+
 [dev-dependencies]
 wiremock = "0.6.2"
 tempfile = "3.13.0"

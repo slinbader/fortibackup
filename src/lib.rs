@@ -20,6 +20,7 @@ pub mod backup;
 pub mod cli;
 pub mod config;
 pub mod error;
+pub mod metrics;
 pub mod notify;
 pub mod scheduler;
 pub mod storage;

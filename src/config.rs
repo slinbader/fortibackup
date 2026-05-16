@@ -20,7 +20,17 @@ pub struct Config {
     #[serde(default)]
     pub notifications: NotificationsConfig,
     #[serde(default)]
+    pub metrics: MetricsConfig,
+    #[serde(default)]
     pub devices: Vec<Device>,
+}
+
+/// Prometheus metrics endpoint configuration.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct MetricsConfig {
+    /// Address to bind the `/metrics` HTTP server on, e.g. `"127.0.0.1:9090"`.
+    /// When absent, the endpoint is not started.
+    pub listen: Option<String>,
 }
 
 /// Global daemon settings.

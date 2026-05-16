@@ -20,7 +20,7 @@ use tracing_subscriber::EnvFilter;
 
 use fortibackup::cli::{Cli, Command};
 use fortibackup::config::{self, load_config, Config};
-use fortibackup::{backup, notify, scheduler, storage, transport};
+use fortibackup::{backup, metrics, notify, scheduler, storage, transport};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -71,6 +71,11 @@ fn init_tracing(level: &str) {
 }
 
 async fn cmd_run(cfg: Config) -> anyhow::Result<()> {
+    if let Some(listen) = cfg.metrics.listen.clone() {
+        metrics::serve(&listen)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+    }
     scheduler::run(cfg).await.map_err(anyhow::Error::from)
 }
 

@@ -14,6 +14,11 @@ log_level = "info"
 # the plaintext SHA-256 so no_change detection works regardless.
 compress = false
 
+# Optional Prometheus metrics exporter. Comment out or omit to disable.
+# Exposes /metrics on the bound address — scrape from your Prometheus.
+[metrics]
+listen = "127.0.0.1:9090"
+
 [notifications]
 on_failure = ["email", "webhook"]
 on_success = []  # leave empty to stay quiet on successful backups
