@@ -44,4 +44,16 @@ pub enum Command {
     /// Validate the configuration file and check reachability of devices
     /// (does not download any configuration).
     Verify,
+
+    /// Apply the retention policy now (delete files older than
+    /// `retention_days`, always keep at least `retention_min_copies`).
+    Prune {
+        /// Limit to the given device name.
+        #[arg(long)]
+        device: Option<String>,
+
+        /// Show what would be deleted without touching the filesystem.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }

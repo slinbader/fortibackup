@@ -242,35 +242,58 @@ pub fn apply_retention(
     min_copies: u32,
 ) -> Result<usize, StorageError> {
     let entries = list_entries_for_device(backup_dir, device_name)?;
-    decide_and_delete(entries, retention_days, min_copies, Utc::now())
+    let victims = pick_victims(entries, retention_days, min_copies, Utc::now());
+    delete_victims(&victims)
 }
 
-fn decide_and_delete(
+/// Like [`apply_retention`] but only computes what *would* be deleted.
+///
+/// # Errors
+/// Returns [`StorageError`] on IO failures while reading the directory.
+pub fn plan_retention(
+    backup_dir: &Path,
+    device_name: &str,
+    retention_days: u32,
+    min_copies: u32,
+) -> Result<Vec<BackupEntry>, StorageError> {
+    let entries = list_entries_for_device(backup_dir, device_name)?;
+    Ok(pick_victims(entries, retention_days, min_copies, Utc::now()))
+}
+
+fn pick_victims(
     mut entries: Vec<BackupEntry>,
     retention_days: u32,
     min_copies: u32,
     now: DateTime<Utc>,
-) -> Result<usize, StorageError> {
+) -> Vec<BackupEntry> {
     // newest first
     entries.sort_by_key(|e| std::cmp::Reverse(e.created_at));
-
     let cutoff = now - chrono::Duration::days(i64::from(retention_days));
-    let mut removed = 0_usize;
-    for (idx, entry) in entries.iter().enumerate() {
-        if (idx as u32) < min_copies {
-            continue;
-        }
-        if entry.created_at < cutoff {
-            let conf = &entry.path;
-            let sidecar = conf.with_extension("json");
-            std::fs::remove_file(conf).map_err(|e| io_err(conf, e))?;
-            if sidecar.exists() {
-                std::fs::remove_file(&sidecar).map_err(|e| io_err(&sidecar, e))?;
+    entries
+        .into_iter()
+        .enumerate()
+        .filter_map(|(idx, e)| {
+            if (idx as u32) < min_copies {
+                None
+            } else if e.created_at < cutoff {
+                Some(e)
+            } else {
+                None
             }
-            removed += 1;
+        })
+        .collect()
+}
+
+fn delete_victims(victims: &[BackupEntry]) -> Result<usize, StorageError> {
+    for entry in victims {
+        let conf = &entry.path;
+        let sidecar = conf.with_extension("json");
+        std::fs::remove_file(conf).map_err(|e| io_err(conf, e))?;
+        if sidecar.exists() {
+            std::fs::remove_file(&sidecar).map_err(|e| io_err(&sidecar, e))?;
         }
     }
-    Ok(removed)
+    Ok(victims.len())
 }
 
 #[cfg(test)]
@@ -352,8 +375,9 @@ mod tests {
                 sha256: "abc".into(),
             });
         }
-        let removed = decide_and_delete(entries, 90, 7, now).unwrap();
-        // 10 entries, all expired, min 7 kept => 3 removed
+        let victims = pick_victims(entries, 90, 7, now);
+        assert_eq!(victims.len(), 3);
+        let removed = delete_victims(&victims).unwrap();
         assert_eq!(removed, 3);
         let surviving = list_entries_for_device(dir.path(), "fgt-a").unwrap();
         assert_eq!(surviving.len(), 7);
@@ -381,8 +405,8 @@ mod tests {
             });
         }
         // retention=90 days, all entries within 19 days => none removed
-        let removed = decide_and_delete(entries, 90, 7, now).unwrap();
-        assert_eq!(removed, 0);
+        let victims = pick_victims(entries, 90, 7, now);
+        assert!(victims.is_empty());
     }
 
     #[test]

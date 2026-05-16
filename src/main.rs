@@ -43,6 +43,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Once { device } => cmd_once(cfg, device).await,
         Command::List { device } => cmd_list(&cfg, device.as_deref()),
         Command::Verify => cmd_verify(cfg).await,
+        Command::Prune { device, dry_run } => cmd_prune(&cfg, device.as_deref(), dry_run),
     }
 }
 
@@ -151,6 +152,56 @@ async fn cmd_verify(cfg: Config) -> anyhow::Result<()> {
     }
     if any_unreachable {
         anyhow::bail!("one or more devices are unreachable");
+    }
+    Ok(())
+}
+
+fn cmd_prune(cfg: &Config, device: Option<&str>, dry_run: bool) -> anyhow::Result<()> {
+    let devices: Vec<String> = match device {
+        Some(name) => {
+            cfg.find_device(name)
+                .with_context(|| format!("device `{name}` not found in config"))?;
+            vec![name.to_owned()]
+        }
+        None => cfg.devices.iter().map(|d| d.name.clone()).collect(),
+    };
+    if devices.is_empty() {
+        anyhow::bail!("no devices to prune");
+    }
+
+    let mut total = 0_usize;
+    for name in &devices {
+        let victims = storage::plan_retention(
+            &cfg.global.backup_dir,
+            name,
+            cfg.global.retention_days,
+            cfg.global.retention_min_copies,
+        )?;
+        if victims.is_empty() {
+            println!("{name}: nothing to prune");
+            continue;
+        }
+        if dry_run {
+            println!("{name}: would delete {} file(s):", victims.len());
+            for v in &victims {
+                println!("  - {}", v.path.display());
+            }
+        } else {
+            for v in &victims {
+                println!("  - removing {}", v.path.display());
+            }
+            let removed = storage::apply_retention(
+                &cfg.global.backup_dir,
+                name,
+                cfg.global.retention_days,
+                cfg.global.retention_min_copies,
+            )?;
+            println!("{name}: removed {removed} file(s)");
+            total += removed;
+        }
+    }
+    if !dry_run {
+        info!(total, "prune completed");
     }
     Ok(())
 }
