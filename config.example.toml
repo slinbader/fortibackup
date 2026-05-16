@@ -1,0 +1,54 @@
+# fortibackup — example configuration
+# Copy to /etc/fortibackup/config.toml and adjust for your environment.
+# Secrets are NEVER stored in this file; *_env fields point to environment
+# variables that are read at runtime (see /etc/fortibackup/environment for
+# the systemd EnvironmentFile).
+
+[global]
+backup_dir = "/var/lib/fortibackup"
+retention_days = 90
+retention_min_copies = 7
+log_level = "info"
+
+[notifications]
+on_failure = ["email", "webhook"]
+on_success = []  # leave empty to stay quiet on successful backups
+
+[notifications.email]
+smtp_host = "smtp.gmail.com"
+smtp_port = 587
+smtp_user = "alerts@example.com"
+smtp_password_env = "SMTP_PASSWORD"
+from = "alerts@example.com"
+to = ["luis.herrera@rnpn.gob.sv"]
+
+[notifications.webhook]
+url = "https://hooks.slack.com/services/xxx"
+method = "POST"
+
+# ---------------------------------------------------------------------------
+# Devices
+# ---------------------------------------------------------------------------
+
+[[devices]]
+name = "fortigate-primary"
+host = "10.0.0.1"
+port = 443
+method = "api"
+api_token_env = "FGT_TOKEN_PRIMARY"
+# cron format: sec min hour day month weekday
+schedule = "0 0 2 * * *"   # 02:00 every day
+verify_tls = false
+timeout_secs = 60
+
+[[devices]]
+name = "fortigate-secondary"
+host = "10.0.0.2"
+port = 22
+method = "ssh"
+ssh_username = "backup_user"
+ssh_key_path = "/etc/fortibackup/keys/id_ed25519"
+# alternatively:
+# ssh_password_env = "FGT_SSH_PASSWORD_SECONDARY"
+schedule = "0 0 3 * * *"   # 03:00 every day
+timeout_secs = 120

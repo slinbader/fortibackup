@@ -1,0 +1,78 @@
+[package]
+name = "fortibackup"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Automated configuration backup tool for FortiGate devices"
+license = "MIT"
+authors = ["Luis Herrera <luis.herrera1974@gmail.com>"]
+readme = "README.md"
+repository = "https://github.com/lherrera/fortibackup"
+keywords = ["fortigate", "backup", "network", "cli", "daemon"]
+categories = ["command-line-utilities", "network-programming"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.40", features = ["full"] }
+async-trait = "0.1.83"
+futures = "0.3.31"
+
+# HTTP client (rustls, no openssl)
+reqwest = { version = "0.12.8", default-features = false, features = ["json", "rustls-tls", "rustls-tls-native-roots", "stream"] }
+
+# SSH client
+russh = "0.46.0"
+russh-keys = "0.46.0"
+
+# CLI
+clap = { version = "4.5.20", features = ["derive", "env"] }
+
+# Config
+serde = { version = "1.0.213", features = ["derive"] }
+serde_json = "1.0.132"
+toml = "0.8.19"
+
+# Scheduling
+tokio-cron-scheduler = "0.13.0"
+
+# Logging
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter", "json", "fmt", "time"] }
+
+# Email
+lettre = { version = "0.11.10", default-features = false, features = ["smtp-transport", "rustls-tls", "tokio1-rustls-tls", "builder", "tokio1"] }
+
+# Hashing
+sha2 = "0.10.8"
+hex = "0.4.3"
+
+# Dates
+chrono = { version = "0.4.38", features = ["serde"] }
+
+# Errors
+anyhow = "1.0.91"
+thiserror = "1.0.65"
+
+# Filesystem / utilities
+walkdir = "2.5.0"
+humantime = "2.1.0"
+
+[dev-dependencies]
+wiremock = "0.6.2"
+tempfile = "3.13.0"
+tokio = { version = "1.40", features = ["full", "test-util"] }
+pretty_assertions = "1.4.1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[lib]
+name = "fortibackup"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fortibackup"
+path = "src/main.rs"

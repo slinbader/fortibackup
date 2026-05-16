@@ -1,0 +1,32 @@
+[Unit]
+Description=FortiGate Configuration Backup Service
+Documentation=https://github.com/lherrera/fortibackup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fortibackup
+Group=fortibackup
+EnvironmentFile=/etc/fortibackup/environment
+ExecStart=/usr/local/bin/fortibackup run --config /etc/fortibackup/config.toml
+Restart=on-failure
+RestartSec=30s
+
+# Filesystem isolation
+StateDirectory=fortibackup
+ReadWritePaths=/var/lib/fortibackup
+ProtectSystem=strict
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
