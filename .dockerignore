@@ -1,0 +1,14 @@
+target/
+.git/
+.github/
+.claude/
+.idea/
+.vscode/
+*.swp
+*.log
+Dockerfile
+.dockerignore
+README.md
+LICENSE
+systemd/
+debian/

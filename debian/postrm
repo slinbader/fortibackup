@@ -1,0 +1,36 @@
+#!/bin/sh
+# postrm script for fortibackup
+set -e
+
+case "$1" in
+    purge)
+        # On full purge, drop the system user and clean up state.
+        # Config files in /etc/fortibackup/ are removed by dpkg (conffiles)
+        # except for files we created (environment, config.toml seeded copy).
+        if [ -d /etc/fortibackup ]; then
+            rm -f /etc/fortibackup/environment /etc/fortibackup/config.toml
+            rmdir --ignore-fail-on-non-empty /etc/fortibackup || true
+        fi
+        if [ -d /var/lib/fortibackup ]; then
+            rm -rf /var/lib/fortibackup
+        fi
+        if getent passwd fortibackup >/dev/null; then
+            deluser --system fortibackup || true
+        fi
+        if getent group fortibackup >/dev/null; then
+            delgroup --system fortibackup || true
+        fi
+        ;;
+
+    remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+
+    *)
+        echo "postrm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

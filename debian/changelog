@@ -1,0 +1,10 @@
+fortibackup (0.1.0-1) unstable; urgency=medium
+
+  * Initial release.
+  * REST API and SSH transports for FortiGate.
+  * Per-device cron scheduling, SHA-256 deduplication, retention.
+  * Email + webhook notifications, optional gzip compression.
+  * Optional Prometheus /metrics exporter.
+  * systemd unit with filesystem hardening.
+
+ -- Luis Herrera <luis.herrera@rnpn.gob.sv>  Sat, 16 May 2026 23:00:00 +0000

@@ -79,6 +79,34 @@ lto = "thin"
 codegen-units = 1
 strip = true
 
+# -----------------------------------------------------------------------------
+# Debian packaging via `cargo deb`.
+# Build with:  cargo deb
+# Install:     sudo apt install ./target/debian/fortibackup_*_amd64.deb
+# -----------------------------------------------------------------------------
+[package.metadata.deb]
+maintainer = "Luis Herrera <luis.herrera@rnpn.gob.sv>"
+copyright = "2026, Luis Herrera <luis.herrera@rnpn.gob.sv>"
+license-file = ["LICENSE", "4"]
+extended-description = """\
+fortibackup connects periodically to one or more FortiGate devices, downloads \
+their running configuration via the REST API or SSH, versions the result on \
+disk with metadata, and notifies on failures via email or webhook. Designed to \
+run as an unattended systemd service."""
+depends = "$auto, adduser"
+section = "net"
+priority = "optional"
+assets = [
+    ["target/release/fortibackup", "usr/bin/", "755"],
+    ["config.example.toml", "etc/fortibackup/config.example.toml", "644"],
+    ["README.md", "usr/share/doc/fortibackup/README.md", "644"],
+    ["LICENSE", "usr/share/doc/fortibackup/LICENSE", "644"],
+]
+maintainer-scripts = "debian/"
+changelog = "debian/changelog"
+systemd-units = { unit-name = "fortibackup", unit-scripts = "systemd", enable = false, start = false }
+conf-files = ["/etc/fortibackup/config.example.toml"]
+
 [lib]
 name = "fortibackup"
 path = "src/lib.rs"

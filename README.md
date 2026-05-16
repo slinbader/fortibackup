@@ -29,7 +29,42 @@ fills the gap with a small, auditable, dependency-light service:
 - Rust **1.75** or newer
 - Outbound network access from the host to each FortiGate (HTTPS or SSH)
 
-## Build & install
+## Install
+
+Three options, pick whichever fits:
+
+### 1) Debian package (recommended for Debian/Ubuntu)
+
+```sh
+cargo install cargo-deb       # one-off
+cargo deb                     # produces target/debian/fortibackup_*_amd64.deb
+sudo apt install ./target/debian/fortibackup_0.1.0-1_amd64.deb
+```
+
+The postinst creates the `fortibackup` system user, seeds
+`/etc/fortibackup/config.toml` from the example, and installs the systemd
+unit. After editing the config and `environment` file:
+
+```sh
+sudo systemctl enable --now fortibackup.service
+```
+
+### 2) Docker
+
+```sh
+docker build -t fortibackup:0.1.0 .                              # ~32 MB final image (distroless)
+docker run --rm \
+  -v $(pwd)/config.toml:/etc/fortibackup/config.toml:ro \
+  -v fortibackup-data:/var/lib/fortibackup \
+  -e FGT_TOKEN_PRIMARY="$FGT_TOKEN_PRIMARY" \
+  fortibackup:0.1.0 once
+```
+
+The image runs as the distroless `nonroot` user. Optional `/metrics`
+exporter listens on port 9090 — expose with `-p 9090:9090` when enabling
+the `[metrics]` block.
+
+### 3) From source
 
 ```sh
 git clone https://example.com/lherrera/fortibackup.git

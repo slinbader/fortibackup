@@ -1,0 +1,59 @@
+#!/bin/sh
+# postinst script for fortibackup
+set -e
+
+case "$1" in
+    configure)
+        # Create system user/group if missing
+        if ! getent group fortibackup >/dev/null; then
+            addgroup --system fortibackup
+        fi
+        if ! getent passwd fortibackup >/dev/null; then
+            adduser --system --ingroup fortibackup \
+                --home /var/lib/fortibackup \
+                --shell /usr/sbin/nologin \
+                --no-create-home \
+                --gecos "fortibackup service" \
+                fortibackup
+        fi
+
+        # Ensure state and config directories exist with correct ownership
+        install -d -m 0750 -o fortibackup -g fortibackup /var/lib/fortibackup
+        install -d -m 0750 -o fortibackup -g fortibackup /etc/fortibackup
+
+        # On first install, seed config.toml from the example if absent
+        if [ ! -e /etc/fortibackup/config.toml ]; then
+            cp /etc/fortibackup/config.example.toml /etc/fortibackup/config.toml
+            chown fortibackup:fortibackup /etc/fortibackup/config.toml
+            chmod 0640 /etc/fortibackup/config.toml
+            echo "fortibackup: seeded /etc/fortibackup/config.toml — edit it before starting the service." >&2
+        fi
+
+        # Environment file holds secrets (API tokens, SMTP password, etc.)
+        if [ ! -e /etc/fortibackup/environment ]; then
+            cat > /etc/fortibackup/environment <<'EOF'
+# Environment for fortibackup. Referenced by the systemd unit.
+# chmod 0600 — contents are loaded into the process environment.
+# Add entries here for every *_env name referenced from /etc/fortibackup/config.toml.
+#
+# Example:
+# FGT_TOKEN_PRIMARY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# SMTP_PASSWORD=app-password
+EOF
+            chown fortibackup:fortibackup /etc/fortibackup/environment
+            chmod 0600 /etc/fortibackup/environment
+        fi
+        ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+
+    *)
+        echo "postinst called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0
