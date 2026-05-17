@@ -13,8 +13,11 @@
 //! `fortibackup` binary entry point. All logic lives in the library crate;
 //! this file only wires up the CLI to the modules.
 
+use std::io;
+
 use anyhow::Context;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use clap_complete::generate;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -25,6 +28,15 @@ use fortibackup::{backup, metrics, notify, scheduler, storage, transport};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    // These subcommands never touch the config file or the network.
+    // Handle them before doing anything else so they can be used in
+    // packaging scripts and CI without a populated /etc/fortibackup.
+    match cli.command {
+        Command::Completions { shell } => return cmd_completions(shell.into()),
+        Command::Manpage => return cmd_manpage(),
+        _ => {}
+    }
 
     let cfg = load_config(&cli.config)
         .with_context(|| format!("loading config {}", cli.config.display()))?;
@@ -44,7 +56,23 @@ async fn main() -> anyhow::Result<()> {
         Command::List { device } => cmd_list(&cfg, device.as_deref()),
         Command::Verify => cmd_verify(cfg).await,
         Command::Prune { device, dry_run } => cmd_prune(&cfg, device.as_deref(), dry_run),
+        Command::Completions { .. } | Command::Manpage => unreachable!(),
     }
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn cmd_completions(shell: clap_complete::Shell) -> anyhow::Result<()> {
+    let mut cmd = Cli::command();
+    let name = cmd.get_name().to_owned();
+    generate(shell, &mut cmd, name, &mut io::stdout());
+    Ok(())
+}
+
+fn cmd_manpage() -> anyhow::Result<()> {
+    let cmd = Cli::command();
+    let man = clap_mangen::Man::new(cmd);
+    man.render(&mut io::stdout())?;
+    Ok(())
 }
 
 fn init_tracing(level: &str) {

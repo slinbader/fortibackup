@@ -2,7 +2,8 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
 
 const DEFAULT_CONFIG: &str = "/etc/fortibackup/config.toml";
 
@@ -56,4 +57,40 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Print shell completion script to stdout.
+    ///
+    /// Example: `fortibackup completions bash | sudo tee /etc/bash_completion.d/fortibackup`
+    Completions {
+        /// Target shell (bash, zsh, fish, elvish, powershell).
+        shell: ShellArg,
+    },
+
+    /// Print a roff-format man page to stdout.
+    ///
+    /// Example: `fortibackup manpage | gzip -9 | sudo tee /usr/share/man/man1/fortibackup.1.gz`
+    Manpage,
+}
+
+/// Shells supported by clap_complete, surfaced as a clap-native enum so the
+/// CLI rejects unknown values at parse time.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ShellArg {
+    Bash,
+    Zsh,
+    Fish,
+    Elvish,
+    Powershell,
+}
+
+impl From<ShellArg> for Shell {
+    fn from(s: ShellArg) -> Self {
+        match s {
+            ShellArg::Bash => Shell::Bash,
+            ShellArg::Zsh => Shell::Zsh,
+            ShellArg::Fish => Shell::Fish,
+            ShellArg::Elvish => Shell::Elvish,
+            ShellArg::Powershell => Shell::PowerShell,
+        }
+    }
 }

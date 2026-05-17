@@ -26,6 +26,8 @@ russh-keys = "0.46.0"
 
 # CLI
 clap = { version = "4.5.20", features = ["derive", "env"] }
+clap_complete = "4.5.36"
+clap_mangen = "0.2.24"
 
 # Config
 serde = { version = "1.0.213", features = ["derive"] }
@@ -101,6 +103,10 @@ assets = [
     ["config.example.toml", "etc/fortibackup/config.example.toml", "644"],
     ["README.md", "usr/share/doc/fortibackup/README.md", "644"],
     ["LICENSE", "usr/share/doc/fortibackup/LICENSE", "644"],
+    ["target/man/fortibackup.1.gz", "usr/share/man/man1/fortibackup.1.gz", "644"],
+    ["target/completions/fortibackup.bash", "usr/share/bash-completion/completions/fortibackup", "644"],
+    ["target/completions/_fortibackup", "usr/share/zsh/vendor-completions/_fortibackup", "644"],
+    ["target/completions/fortibackup.fish", "usr/share/fish/vendor_completions.d/fortibackup.fish", "644"],
 ]
 maintainer-scripts = "debian/"
 changelog = "debian/changelog"
