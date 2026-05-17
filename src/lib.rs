@@ -24,4 +24,5 @@ pub mod metrics;
 pub mod notify;
 pub mod scheduler;
 pub mod storage;
+pub mod storage_s3;
 pub mod transport;

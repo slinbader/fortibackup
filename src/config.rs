@@ -22,7 +22,42 @@ pub struct Config {
     #[serde(default)]
     pub metrics: MetricsConfig,
     #[serde(default)]
+    pub storage: StorageConfig,
+    #[serde(default)]
     pub devices: Vec<Device>,
+}
+
+/// Optional secondary storage destinations. Filesystem is always the
+/// primary; these are *mirrors* that receive a copy of each new backup.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct StorageConfig {
+    pub s3: Option<S3Config>,
+}
+
+/// S3 / S3-compatible (MinIO, Wasabi, Backblaze B2) mirror.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct S3Config {
+    pub bucket: String,
+    #[serde(default = "default_s3_region")]
+    pub region: String,
+    /// Optional custom endpoint (e.g. `https://minio.internal:9000`).
+    /// Required for non-AWS providers.
+    pub endpoint: Option<String>,
+    /// Object key prefix; appended before `{device}/{filename}`.
+    #[serde(default)]
+    pub prefix: String,
+    /// Env var holding the AWS access key. If absent, falls back to the
+    /// usual AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / role chain.
+    pub access_key_env: Option<String>,
+    pub secret_key_env: Option<String>,
+    /// For MinIO / older providers that need path-style addressing
+    /// (`endpoint/bucket/key` instead of `bucket.endpoint/key`).
+    #[serde(default)]
+    pub force_path_style: bool,
+}
+
+fn default_s3_region() -> String {
+    "us-east-1".to_owned()
 }
 
 /// Prometheus metrics endpoint configuration.

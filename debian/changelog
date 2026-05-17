@@ -1,3 +1,14 @@
+fortibackup (0.2.0-1) unstable; urgency=medium
+
+  * Optional VDOM scope per device (vdom = "tenant-x").
+  * Post-fetch payload validation: reject HTML / login walls / truncated
+    bodies that would otherwise be persisted as fake backups.
+  * S3 / S3-compatible (MinIO, Wasabi, B2) mirror destination, configured
+    under [storage.s3]. Filesystem remains the authoritative store.
+  * Shell completions (bash/zsh/fish) and man page packaged with the .deb.
+
+ -- Luis Herrera <luis.herrera@rnpn.gob.sv>  Sat, 17 May 2026 00:30:00 +0000
+
 fortibackup (0.1.0-1) unstable; urgency=medium
 
   * Initial release.

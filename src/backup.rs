@@ -1,14 +1,17 @@
 //! Backup pipeline: fetch → hash → diff → store → retention → notify.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::Utc;
+use tokio::sync::OnceCell;
 use tracing::{error, info, warn};
 
 use crate::config::{Config, Device, TransportMethod};
 use crate::error::BackupError;
 use crate::notify::{self, NotificationEvent, Status};
 use crate::storage::{self, SaveOutcome};
+use crate::storage_s3::{self, S3Mirror};
 use crate::transport;
 
 /// Result of running a backup for a single device.
@@ -113,6 +116,34 @@ struct PipelineOutcome {
     hash: String,
 }
 
+/// Lazily-built S3 mirror (built once, reused across all backup runs).
+static S3_MIRROR: OnceCell<Option<Arc<S3Mirror>>> = OnceCell::const_new();
+
+async fn s3_mirror(cfg: &Config) -> Option<Arc<S3Mirror>> {
+    S3_MIRROR
+        .get_or_init(|| async {
+            match cfg.storage.s3.as_ref() {
+                None => None,
+                Some(s3_cfg) => match S3Mirror::from_config(s3_cfg).await {
+                    Ok(m) => {
+                        info!(
+                            bucket = %s3_cfg.bucket,
+                            endpoint = ?s3_cfg.endpoint,
+                            "s3 mirror enabled"
+                        );
+                        Some(Arc::new(m))
+                    }
+                    Err(err) => {
+                        error!(error = %err, "failed to initialize s3 mirror; continuing without it");
+                        None
+                    }
+                },
+            }
+        })
+        .await
+        .clone()
+}
+
 async fn execute(cfg: &Config, device: &Device) -> Result<PipelineOutcome, BackupError> {
     let transport_impl = transport::new(device.method);
     let artifact = transport_impl.fetch_config(device).await?;
@@ -120,7 +151,7 @@ async fn execute(cfg: &Config, device: &Device) -> Result<PipelineOutcome, Backu
 
     let SaveOutcome {
         changed,
-        path: _,
+        path,
         sha256,
     } = storage::save_backup(
         &cfg.global.backup_dir,
@@ -129,6 +160,19 @@ async fn execute(cfg: &Config, device: &Device) -> Result<PipelineOutcome, Backu
         &artifact,
         cfg.global.compress,
     )?;
+
+    // Mirror only when a new file was written. no_change runs skip both
+    // local writes and remote uploads — the existing copies are already
+    // identical to what S3 holds.
+    if changed {
+        if let Some(mirror) = s3_mirror(cfg).await {
+            let sidecar = path.with_extension("json");
+            // Sidecar lives next to the .conf, but .conf.gz needs different
+            // logic. Easier path: derive sidecar from the .conf[.gz] name.
+            let sidecar = sidecar_for(&path).unwrap_or(sidecar);
+            storage_s3::mirror_new_backup(&mirror, &device.name, &path, &sidecar).await;
+        }
+    }
 
     match storage::apply_retention(
         &cfg.global.backup_dir,
@@ -150,6 +194,14 @@ async fn execute(cfg: &Config, device: &Device) -> Result<PipelineOutcome, Backu
         bytes,
         hash: sha256,
     })
+}
+
+fn sidecar_for(conf: &std::path::Path) -> Option<std::path::PathBuf> {
+    let name = conf.file_name()?.to_str()?;
+    let stem = name
+        .strip_suffix(".conf.gz")
+        .or_else(|| name.strip_suffix(".conf"))?;
+    Some(conf.with_file_name(format!("{stem}.json")))
 }
 
 #[must_use]

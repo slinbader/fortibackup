@@ -1,6 +1,6 @@
 [package]
 name = "fortibackup"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Automated configuration backup tool for FortiGate devices"
@@ -68,6 +68,11 @@ hyper = { version = "1.5.0", features = ["server", "http1"] }
 hyper-util = { version = "0.1.10", features = ["tokio"] }
 http-body-util = "0.1.2"
 bytes = "1.7.2"
+
+# S3 / S3-compatible (MinIO) mirror destination
+aws-config = { version = "1.5.10", default-features = false, features = ["rustls", "behavior-version-latest", "rt-tokio"] }
+aws-sdk-s3 = { version = "1.59.0", default-features = false, features = ["rustls", "behavior-version-latest", "rt-tokio"] }
+aws-credential-types = "1.2.1"
 
 [dev-dependencies]
 wiremock = "0.6.2"
