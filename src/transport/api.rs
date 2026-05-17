@@ -127,7 +127,11 @@ async fn fetch_backup_blob(
     token: &str,
     device: &Device,
 ) -> Result<Vec<u8>, TransportError> {
-    let url = format!("{base}/api/v2/monitor/system/config/backup?scope=global");
+    let query = match device.vdom.as_deref() {
+        Some(name) => format!("scope=vdom&vdom={}", urlencode(name)),
+        None => "scope=global".to_owned(),
+    };
+    let url = format!("{base}/api/v2/monitor/system/config/backup?{query}");
     let resp = client
         .get(&url)
         .header(AUTHORIZATION, format!("Bearer {token}"))
@@ -151,12 +155,55 @@ async fn fetch_backup_blob(
         });
     }
     let bytes = resp.bytes().await.map_err(TransportError::Http)?;
+    let bytes = bytes.to_vec();
+    validate_fortigate_config(&bytes)?;
+    Ok(bytes)
+}
+
+/// Reject payloads that don't look like a FortiGate configuration. Catches
+/// the cases where the device returns an HTML error page, a login wall, or
+/// truncated bytes — all of which would otherwise be silently persisted as
+/// a fake "backup".
+fn validate_fortigate_config(bytes: &[u8]) -> Result<(), TransportError> {
     if bytes.is_empty() {
         return Err(TransportError::InvalidResponse(
             "empty backup body".to_owned(),
         ));
     }
-    Ok(bytes.to_vec())
+    // Real FortiGate exports always start with one of these two markers:
+    //   #config-version=...   (text export)
+    //   #conf_file_ver=...    (some firmware variants)
+    let head: &[u8] = if bytes.len() > 64 {
+        &bytes[..64]
+    } else {
+        bytes
+    };
+    let head_str = String::from_utf8_lossy(head);
+    let trimmed = head_str.trim_start();
+    if trimmed.starts_with("#config-version=")
+        || trimmed.starts_with("#conf_file_ver=")
+        || trimmed.starts_with("#config-version =")
+    {
+        return Ok(());
+    }
+    Err(TransportError::InvalidResponse(format!(
+        "payload does not look like a FortiGate config (first bytes: {:?})",
+        truncate(&head_str, 80)
+    )))
+}
+
+/// Minimal application/x-www-form-urlencoded for a single value. VDOM names
+/// are limited to `[A-Za-z0-9_-]` by FortiOS, so this only handles the
+/// conservative subset we expect.
+fn urlencode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -249,6 +296,7 @@ mod tests {
             ssh_username: None,
             ssh_key_path: None,
             ssh_password_env: None,
+            vdom: None,
             schedule: "0 0 2 * * *".to_owned(),
             timeout_secs: 5,
         }
@@ -259,7 +307,8 @@ mod tests {
         // SAFETY: tests are single-threaded inside this binary; env mutation is fine.
         std::env::set_var("FGT_TEST_TOKEN", "abc123");
         let server = MockServer::start().await;
-        let backup_body = b"config-system global\nset hostname fgt-x\nend\n";
+        let backup_body =
+            b"#config-version=FGT60E-7.4.4-FW-build2658-240926:opmode=0\nconfig system global\n    set hostname \"fgt-x\"\nend\n";
 
         Mock::given(method("GET"))
             .and(path("/api/v2/monitor/system/config/backup"))
@@ -291,6 +340,67 @@ mod tests {
         assert_eq!(artifact.hostname, "fgt-x");
         assert_eq!(artifact.serial.as_deref(), Some("FGT60E1234567890"));
         assert_eq!(artifact.firmware_version.as_deref(), Some("v7.4.4"));
+    }
+
+    #[tokio::test]
+    async fn vdom_scope_query_param_is_set() {
+        std::env::set_var("FGT_TEST_TOKEN", "abc123");
+        let server = MockServer::start().await;
+        let body =
+            b"#config-version=FGT60E-7.4.4\nconfig system global\n    set hostname \"v\"\nend\n";
+
+        Mock::given(method("GET"))
+            .and(path("/api/v2/monitor/system/config/backup"))
+            .and(query_param("scope", "vdom"))
+            .and(query_param("vdom", "tenant-a"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.as_slice()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/monitor/system/status"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": {"hostname": "v", "serial": "S", "version": "v7.4"}
+            })))
+            .mount(&server)
+            .await;
+
+        let transport = ApiTransport::with_base_url(server.uri());
+        let mut device = test_device(443);
+        device.vdom = Some("tenant-a".into());
+        let art = transport.fetch_config(&device).await.expect("fetch");
+        assert!(art.content.starts_with(b"#config-version="));
+    }
+
+    #[tokio::test]
+    async fn rejects_non_fortigate_payload() {
+        std::env::set_var("FGT_TEST_TOKEN", "abc123");
+        let server = MockServer::start().await;
+
+        // Simulate a captive portal / HTML response with a 200.
+        Mock::given(method("GET"))
+            .and(path("/api/v2/monitor/system/config/backup"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(&b"<!DOCTYPE html><html>login</html>"[..]),
+            )
+            .mount(&server)
+            .await;
+
+        let transport = ApiTransport::with_base_url(server.uri());
+        let device = test_device(443);
+        let err = transport.fetch_config(&device).await.unwrap_err();
+        assert!(
+            err.to_string().contains("does not look like a FortiGate"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn urlencode_basic() {
+        assert_eq!(urlencode("root"), "root");
+        assert_eq!(urlencode("tenant-a"), "tenant-a");
+        assert_eq!(urlencode("a b"), "a%20b");
+        assert_eq!(urlencode("a/b"), "a%2Fb");
     }
 
     #[tokio::test]

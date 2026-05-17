@@ -24,6 +24,7 @@ fn make_device(token_env: &str) -> Device {
         ssh_username: None,
         ssh_key_path: None,
         ssh_password_env: None,
+        vdom: None,
         schedule: "0 0 2 * * *".into(),
         timeout_secs: 5,
     }

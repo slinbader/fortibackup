@@ -114,6 +114,10 @@ pub struct Device {
     pub api_token_env: Option<String>,
     #[serde(default = "default_verify_tls")]
     pub verify_tls: bool,
+    /// Optional VDOM scope. When set, the backup is fetched with
+    /// `?scope=vdom&vdom=<name>` instead of the default `?scope=global`.
+    /// Use this on multi-VDOM FortiGates when you want a per-tenant backup.
+    pub vdom: Option<String>,
 
     // SSH
     pub ssh_username: Option<String>,
