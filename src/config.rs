@@ -24,7 +24,18 @@ pub struct Config {
     #[serde(default)]
     pub storage: StorageConfig,
     #[serde(default)]
+    pub webui: WebUiConfig,
+    #[serde(default)]
     pub devices: Vec<Device>,
+}
+
+/// Embedded read-mostly web UI. Active only under the `run` daemon, behind
+/// HTTP Basic auth. When `listen` is unset the UI never starts.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct WebUiConfig {
+    pub listen: Option<String>,
+    pub user: Option<String>,
+    pub password_env: Option<String>,
 }
 
 /// Optional secondary storage destinations. Filesystem is always the

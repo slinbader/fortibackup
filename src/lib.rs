@@ -27,3 +27,4 @@ pub mod scheduler;
 pub mod storage;
 pub mod storage_s3;
 pub mod transport;
+pub mod webui;

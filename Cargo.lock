@@ -1277,13 +1277,14 @@ dependencies = [
 
 [[package]]
 name = "fortibackup"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
  "aws-config",
  "aws-credential-types",
  "aws-sdk-s3",
+ "base64",
  "bytes",
  "chrono",
  "clap",
@@ -1305,6 +1306,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "subtle",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

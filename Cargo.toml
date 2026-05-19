@@ -1,6 +1,6 @@
 [package]
 name = "fortibackup"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Automated configuration backup tool for FortiGate devices"
@@ -73,6 +73,10 @@ bytes = "1.7.2"
 aws-config = { version = "1.5.10", default-features = false, features = ["rustls", "behavior-version-latest", "rt-tokio"] }
 aws-sdk-s3 = { version = "1.59.0", default-features = false, features = ["rustls", "behavior-version-latest", "rt-tokio"] }
 aws-credential-types = "1.2.1"
+
+# Web UI dependencies
+base64 = "0.22.1"
+subtle = "2.6.1"
 
 [dev-dependencies]
 wiremock = "0.6.2"

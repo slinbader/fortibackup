@@ -1,3 +1,16 @@
+fortibackup (0.3.0-1) unstable; urgency=medium
+
+  * Embedded Web UI. New optional [webui] block enables a server-side
+    rendered dashboard on the daemon: lists devices, shows backup
+    history per device, allows downloading the .conf and the JSON
+    sidecar, and exposes a "Run now" button that triggers a backup
+    on demand. HTTP Basic auth on every endpoint; credentials are
+    compared in constant time. Concurrent manual runs of the same
+    device are rejected with HTTP 409 to avoid races with the
+    scheduler. Path-traversal in download URLs returns HTTP 400.
+
+ -- Luis Herrera <luis.herrera@rnpn.gob.sv>  Tue, 19 May 2026 18:00:00 +0000
+
 fortibackup (0.2.1-1) unstable; urgency=medium
 
   * Dedup normalization: strip ENC blobs and encrypted PEM private keys

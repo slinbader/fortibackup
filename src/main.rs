@@ -23,7 +23,7 @@ use tracing_subscriber::EnvFilter;
 
 use fortibackup::cli::{Cli, Command};
 use fortibackup::config::{self, load_config, Config};
-use fortibackup::{backup, metrics, notify, scheduler, storage, transport};
+use fortibackup::{backup, metrics, notify, scheduler, storage, transport, webui};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -103,6 +103,10 @@ async fn cmd_run(cfg: Config) -> anyhow::Result<()> {
         metrics::serve(&listen)
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
+    }
+    if cfg.webui.listen.is_some() {
+        let shared = std::sync::Arc::new(cfg.clone());
+        webui::serve(shared).await.map_err(|e| anyhow::anyhow!(e))?;
     }
     scheduler::run(cfg).await.map_err(anyhow::Error::from)
 }
