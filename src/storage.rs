@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::StorageError;
+use crate::normalize;
 use crate::transport::BackupArtifact;
 
 /// Filename extension used when compression is enabled.
@@ -32,8 +33,15 @@ pub struct BackupMetadata {
     pub fetched_at: DateTime<Utc>,
     /// Plaintext content size, regardless of on-disk compression.
     pub size_bytes: u64,
-    /// SHA-256 of the **plaintext** content (not the compressed blob).
+    /// SHA-256 of the **normalized** plaintext content (ENC blobs and PEM
+    /// private keys replaced with placeholders). This is what `no_change`
+    /// detection compares against — FortiOS re-encrypts those blobs on
+    /// every fetch with a fresh IV, so the raw bytes always differ.
     pub sha256: String,
+    /// SHA-256 of the literal bytes on disk (before any compression).
+    /// Useful for integrity audits but never used for dedup.
+    #[serde(default)]
+    pub raw_sha256: Option<String>,
     pub firmware_version: Option<String>,
     pub serial: Option<String>,
     pub transport: String,
@@ -112,7 +120,11 @@ pub fn save_backup(
     let dir = device_dir(backup_dir, device_name);
     std::fs::create_dir_all(&dir).map_err(|e| io_err(&dir, e))?;
 
-    let hash = sha256_hex(&artifact.content);
+    // Dedup hash is over the normalized content (ENC blobs / PEM private
+    // keys replaced) so that FortiOS re-encrypting on every fetch does not
+    // cause a spurious `changed` event.
+    let hash = sha256_hex(&normalize::for_hash(&artifact.content));
+    let raw_hash = sha256_hex(&artifact.content);
 
     if let Some(previous) = latest_hash(backup_dir, device_name)? {
         if previous == hash {
@@ -148,6 +160,7 @@ pub fn save_backup(
         fetched_at: artifact.fetched_at,
         size_bytes: artifact.content.len() as u64,
         sha256: hash.clone(),
+        raw_sha256: Some(raw_hash),
         firmware_version: artifact.firmware_version.clone(),
         serial: artifact.serial.clone(),
         transport: transport_label.to_owned(),
@@ -234,15 +247,16 @@ pub fn list_entries_for_device(
             let meta: BackupMetadata = serde_json::from_slice(&raw)?;
             meta.sha256
         } else if compressed {
-            // Without a sidecar we cannot recover the plaintext hash from a
-            // compressed file without decompressing — fall back to the hash
-            // of the compressed bytes (best effort, only used in absence of
-            // metadata).
+            // Without a sidecar we cannot decompress and re-normalize cheaply;
+            // fall back to the raw compressed bytes. Only hit when sidecars
+            // were manually deleted.
             let raw = std::fs::read(&path).map_err(|e| io_err(&path, e))?;
             sha256_hex(&raw)
         } else {
+            // Re-derive the dedup hash using the same normalization as on
+            // write, so sidecar-less directories still dedup correctly.
             let raw = std::fs::read(&path).map_err(|e| io_err(&path, e))?;
-            sha256_hex(&raw)
+            sha256_hex(&normalize::for_hash(&raw))
         };
         entries.push(BackupEntry {
             device: device_name.to_owned(),
@@ -491,7 +505,8 @@ mod tests {
         .unwrap();
         save_backup(dir.path(), "fgt-a", "api", &art(b"second", base), false).unwrap();
         let h = latest_hash(dir.path(), "fgt-a").unwrap().unwrap();
-        assert_eq!(h, sha256_hex(b"second"));
+        // latest_hash now returns the dedup-normalized hash, not the raw one.
+        assert_eq!(h, sha256_hex(&normalize::for_hash(b"second")));
     }
 
     #[test]

@@ -1,3 +1,19 @@
+fortibackup (0.2.1-1) unstable; urgency=medium
+
+  * Dedup normalization: strip ENC blobs and encrypted PEM private keys
+    before hashing for `no_change` detection. FortiOS re-encrypts these
+    with a fresh IV on every backup fetch, which previously caused every
+    run to write a new file. Validated against a live FG200F running
+    FortiOS 7.2.13: identical configs now dedupe correctly.
+  * Sidecar gains `raw_sha256` (hash of literal bytes) alongside the
+    existing `sha256` (now the normalized dedup hash). Old sidecars
+    without `raw_sha256` remain readable.
+  * Status parser accepts FortiOS 7.2.13 layout (serial/version at the
+    response root, not inside `results`); sidecars on this firmware now
+    capture firmware_version and serial correctly.
+
+ -- Luis Herrera <luis.herrera@rnpn.gob.sv>  Tue, 19 May 2026 17:50:00 +0000
+
 fortibackup (0.2.0-1) unstable; urgency=medium
 
   * Optional VDOM scope per device (vdom = "tenant-x").

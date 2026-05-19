@@ -213,12 +213,22 @@ struct StatusMeta {
     serial: Option<String>,
 }
 
+// FortiOS lays the status response out differently across versions:
+// - some firmware put hostname/serial/version inside `results`
+// - 7.2.13 puts `serial`, `version`, `build` at the top level and only
+//   `hostname` (and model fields) inside `results`
+// So we deserialize from both places and take whichever shows up.
 #[derive(Debug, Deserialize)]
 struct StatusResponse {
+    #[serde(default)]
     results: StatusResults,
+    #[serde(default)]
+    serial: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct StatusResults {
     hostname: Option<String>,
     serial: Option<String>,
@@ -255,8 +265,8 @@ async fn fetch_status(
             .results
             .hostname
             .unwrap_or_else(|| device.name.clone()),
-        firmware_version: parsed.results.version,
-        serial: parsed.results.serial,
+        firmware_version: parsed.results.version.or(parsed.version),
+        serial: parsed.results.serial.or(parsed.serial),
     })
 }
 
