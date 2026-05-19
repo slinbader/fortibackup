@@ -1,3 +1,12 @@
+fortibackup (0.3.1-1) unstable; urgency=medium
+
+  * fix(systemd): ExecStart pointed at /usr/local/bin/fortibackup but the
+    .deb installs the binary at /usr/bin/fortibackup. The service failed
+    to start cleanly after a fresh `apt install` until the operator created
+    a symlink. Unit now uses /usr/bin/fortibackup, matching the package.
+
+ -- Luis Herrera <luis.herrera@rnpn.gob.sv>  Tue, 19 May 2026 18:40:00 +0000
+
 fortibackup (0.3.0-1) unstable; urgency=medium
 
   * Embedded Web UI. New optional [webui] block enables a server-side

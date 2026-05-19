@@ -9,7 +9,7 @@ Type=simple
 User=fortibackup
 Group=fortibackup
 EnvironmentFile=/etc/fortibackup/environment
-ExecStart=/usr/local/bin/fortibackup run --config /etc/fortibackup/config.toml
+ExecStart=/usr/bin/fortibackup run --config /etc/fortibackup/config.toml
 Restart=on-failure
 RestartSec=30s
 
