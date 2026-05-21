@@ -126,6 +126,7 @@ async fn handle(
         (Method::GET, p) if p.starts_with("/backup/") => {
             serve_backup(&state, &p["/backup/".len()..])
         }
+        (Method::GET, p) if p.starts_with("/diff/") => render_diff(&state, &p["/diff/".len()..]),
         (Method::POST, p) if p.starts_with("/run/") => {
             handle_run(&state, decode_segment(&p["/run/".len()..]).as_str()).await
         }
@@ -203,6 +204,11 @@ button:hover { filter: brightness(1.1); }
 .alert.ok  { background: rgba(158,206,106,0.15); border-left: 3px solid var(--ok); }
 .alert.err { background: rgba(247,118,142,0.15); border-left: 3px solid var(--err); }
 pre { background: #11161d; padding: 12px; border-radius: 4px; overflow-x: auto; font-size: 12px; }
+.diff-body { font-family: ui-monospace, "JetBrains Mono", monospace; font-size: 12px; line-height: 1.4; background: #11161d; padding: 12px; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
+.diff-add { color: var(--ok); background: rgba(158,206,106,0.08); display: block; }
+.diff-del { color: var(--err); background: rgba(247,118,142,0.10); display: block; }
+.diff-ctx { color: var(--muted); display: block; }
+.diff-sep { color: var(--accent); display: block; padding: 4px 0; opacity: 0.6; }
 "#;
 
 fn serve_css() -> Response<Full<Bytes>> {
@@ -313,7 +319,8 @@ async fn render_device(
         .map_err(|e| error_page(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     let mut rows = String::new();
-    for e in entries.iter().rev() {
+    let total = entries.len();
+    for (i, e) in entries.iter().enumerate().rev() {
         let stem = e.path.file_name().and_then(|s| s.to_str()).unwrap_or("?");
         let sidecar_name = match stem
             .strip_suffix(".conf.gz")
@@ -321,6 +328,16 @@ async fn render_device(
         {
             Some(base) => format!("{base}.json"),
             None => format!("{stem}.json"),
+        };
+        // The oldest backup has no previous one to diff against.
+        let diff_link = if i == 0 {
+            String::new()
+        } else {
+            format!(
+                r#" · <a href="/diff/{dev_enc}/{file_enc}">diff</a>"#,
+                dev_enc = url_escape(&device.name),
+                file_enc = url_escape(stem),
+            )
         };
         let _ = write!(
             rows,
@@ -330,7 +347,7 @@ async fn render_device(
   <td class="mono">{hash}</td>
   <td>
     <a href="/backup/{dev_enc}/{file_enc}">conf</a> ·
-    <a href="/backup/{dev_enc}/{side_enc}">sidecar</a>
+    <a href="/backup/{dev_enc}/{side_enc}">sidecar</a>{diff_link}
   </td>
 </tr>"#,
             when = e.created_at.format("%Y-%m-%d %H:%M:%S UTC"),
@@ -339,8 +356,10 @@ async fn render_device(
             dev_enc = url_escape(&device.name),
             file_enc = url_escape(stem),
             side_enc = url_escape(&sidecar_name),
+            diff_link = diff_link,
         );
     }
+    let _ = total; // currently unused, kept for symmetry with future "N backups" copy
     if rows.is_empty() {
         rows.push_str(
             r#"<tr><td colspan="4" style="color: var(--muted);">No backups yet.</td></tr>"#,
@@ -456,6 +475,173 @@ fn mime_for(filename: &str) -> &'static str {
     } else {
         "text/plain; charset=utf-8"
     }
+}
+
+// ---------------------------------------------------------------------------
+// Diff between consecutive backups
+// ---------------------------------------------------------------------------
+
+/// `GET /diff/<device>/<file>` — render a unified diff between `<file>` and
+/// the previous backup of the same device (in chronological order). Both
+/// sides are decompressed if needed and normalized (ENC blobs / PEM private
+/// keys collapsed) so the visible diff reflects *real* configuration
+/// changes, not the per-fetch re-encryption noise.
+#[allow(clippy::result_large_err)]
+fn render_diff(
+    state: &AppState,
+    rest: &str,
+) -> Result<Response<Full<Bytes>>, Response<Full<Bytes>>> {
+    let (dev_seg, file_seg) = rest
+        .split_once('/')
+        .ok_or_else(|| error_page(StatusCode::BAD_REQUEST, "Expected /diff/<device>/<file>"))?;
+    let device = decode_segment(dev_seg);
+    let file = decode_segment(file_seg);
+
+    state.cfg.find_device(&device).ok_or_else(|| {
+        error_page(
+            StatusCode::NOT_FOUND,
+            &format!("Device `{device}` not found"),
+        )
+    })?;
+
+    let entries = storage::list_entries_for_device(&state.cfg.global.backup_dir, &device)
+        .map_err(|e| error_page(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    // Locate the requested file and its immediate predecessor.
+    let idx = entries
+        .iter()
+        .position(|e| {
+            e.path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s == file)
+        })
+        .ok_or_else(|| error_page(StatusCode::NOT_FOUND, "Backup not found"))?;
+    if idx == 0 {
+        return Err(error_page(
+            StatusCode::OK,
+            "No previous backup to diff against — this is the oldest one.",
+        ));
+    }
+    let prev = &entries[idx - 1];
+    let curr = &entries[idx];
+
+    let prev_text = read_normalized(&prev.path)
+        .map_err(|e| error_page(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
+    let curr_text = read_normalized(&curr.path)
+        .map_err(|e| error_page(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
+
+    let diff_html = build_diff_html(&prev_text, &curr_text);
+    let summary = diff_summary(&prev_text, &curr_text);
+
+    let title = format!("Diff · {device}");
+    let body = format!(
+        r#"<h1>Diff · {device}</h1>
+<p>
+  <span class="mono">{prev_name}</span>
+  →
+  <span class="mono">{curr_name}</span>
+</p>
+<p>{summary}</p>
+<p><a href="/device/{dev_enc}">Back to device</a></p>
+<div class="diff">{diff_html}</div>"#,
+        device = html_escape(&device),
+        prev_name = html_escape(
+            prev.path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("?")
+        ),
+        curr_name = html_escape(
+            curr.path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("?")
+        ),
+        summary = html_escape(&summary),
+        dev_enc = url_escape(&device),
+        diff_html = diff_html,
+    );
+    Ok(html_response(page(&title, &body)))
+}
+
+/// Read a backup file from disk, gunzip if needed, then normalize so the
+/// diff reflects logical changes only. Returns the resulting UTF-8 string.
+fn read_normalized(path: &std::path::Path) -> Result<String, String> {
+    let raw = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let plain = if path
+        .extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("gz"))
+    {
+        gunzip(&raw).map_err(|e| format!("gunzip {}: {e}", path.display()))?
+    } else {
+        raw
+    };
+    let normalized = crate::normalize::for_hash(&plain);
+    String::from_utf8(normalized).map_err(|e| format!("invalid utf-8: {e}"))
+}
+
+fn gunzip(bytes: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+    use std::io::Read as _;
+    let mut dec = flate2::read::GzDecoder::new(bytes);
+    let mut out = Vec::with_capacity(bytes.len() * 4);
+    dec.read_to_end(&mut out)?;
+    Ok(out)
+}
+
+fn diff_summary(prev: &str, curr: &str) -> String {
+    use similar::ChangeTag;
+    let diff = similar::TextDiff::from_lines(prev, curr);
+    let (mut added, mut removed) = (0_usize, 0_usize);
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Insert => added += 1,
+            ChangeTag::Delete => removed += 1,
+            ChangeTag::Equal => {}
+        }
+    }
+    if added == 0 && removed == 0 {
+        "No logical differences (config bodies are identical after normalization).".to_owned()
+    } else {
+        format!("{added} line(s) added · {removed} line(s) removed")
+    }
+}
+
+fn build_diff_html(prev: &str, curr: &str) -> String {
+    use similar::ChangeTag;
+    let diff = similar::TextDiff::from_lines(prev, curr);
+    let mut out = String::from("<pre class=\"diff-body\">");
+    let mut any = false;
+    // Show grouped hunks with 3 lines of context — same default as
+    // `git diff --unified=3`. Avoids dumping the whole file when only
+    // a few lines change.
+    for (group_idx, group) in diff.grouped_ops(3).iter().enumerate() {
+        if group_idx > 0 {
+            out.push_str(r#"<span class="diff-sep">···</span>"#);
+        }
+        for op in group {
+            for change in diff.iter_changes(op) {
+                any = true;
+                let (cls, sign) = match change.tag() {
+                    ChangeTag::Delete => ("diff-del", '-'),
+                    ChangeTag::Insert => ("diff-add", '+'),
+                    ChangeTag::Equal => ("diff-ctx", ' '),
+                };
+                let line = change.value();
+                let _ = write!(
+                    out,
+                    "<span class=\"{cls}\">{sign} {}</span>",
+                    html_escape(line)
+                );
+            }
+        }
+    }
+    if !any {
+        out.push_str("(no changes)");
+    }
+    out.push_str("</pre>");
+    out
 }
 
 // ---------------------------------------------------------------------------

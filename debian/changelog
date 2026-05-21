@@ -1,3 +1,17 @@
+fortibackup (0.4.0-1) unstable; urgency=medium
+
+  * feat(webui): diff view between consecutive backups. Each backup row in
+    the device page now has a "diff" link that shows what changed between
+    that backup and the previous one. The diff is computed over the
+    normalized content (same normalization the dedup hash uses), so the
+    visible output reflects real configuration changes — not the ENC
+    blob re-encryption noise FortiOS introduces on every fetch.
+    Built on the `similar` crate; grouped hunks with 3 lines of context,
+    line-level color (green/red/gray), shrunk to the parts that actually
+    changed.
+
+ -- Luis Herrera <luis.herrera@rnpn.gob.sv>  Wed, 21 May 2026 08:30:00 +0000
+
 fortibackup (0.3.1-1) unstable; urgency=medium
 
   * fix(systemd): ExecStart pointed at /usr/local/bin/fortibackup but the
