@@ -1,3 +1,15 @@
+fortibackup (0.4.1-1) unstable; urgency=medium
+
+  * feat(webui): diff between two arbitrary backups, not just consecutive
+    ones. Each device page now shows a "Compare A → B" form with two
+    dropdowns populated from the device's backup history. Form submits
+    as `GET /diff/<device>?a=<file>&b=<file>`, the order is normalized
+    chronologically (older → newer) regardless of selection direction.
+    The original `/diff/<device>/<file>` shortcut still works.
+    Useful for audit queries like "what changed since last month?".
+
+ -- Luis Herrera <luis.herrera@rnpn.gob.sv>  Thu, 22 May 2026 09:00:00 +0000
+
 fortibackup (0.4.0-1) unstable; urgency=medium
 
   * feat(webui): diff view between consecutive backups. Each backup row in

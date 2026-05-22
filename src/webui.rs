@@ -115,6 +115,7 @@ async fn handle(
     }
     let method = req.method().clone();
     let path = req.uri().path().to_owned();
+    let query = req.uri().query().map(str::to_owned);
 
     let result: Result<Response<Full<Bytes>>, Response<Full<Bytes>>> = match (method, path.as_str())
     {
@@ -126,7 +127,9 @@ async fn handle(
         (Method::GET, p) if p.starts_with("/backup/") => {
             serve_backup(&state, &p["/backup/".len()..])
         }
-        (Method::GET, p) if p.starts_with("/diff/") => render_diff(&state, &p["/diff/".len()..]),
+        (Method::GET, p) if p.starts_with("/diff/") => {
+            render_diff(&state, &p["/diff/".len()..], query.as_deref())
+        }
         (Method::POST, p) if p.starts_with("/run/") => {
             handle_run(&state, decode_segment(&p["/run/".len()..]).as_str()).await
         }
@@ -209,6 +212,9 @@ pre { background: #11161d; padding: 12px; border-radius: 4px; overflow-x: auto; 
 .diff-del { color: var(--err); background: rgba(247,118,142,0.10); display: block; }
 .diff-ctx { color: var(--muted); display: block; }
 .diff-sep { color: var(--accent); display: block; padding: 4px 0; opacity: 0.6; }
+form.compare { display: flex; align-items: center; gap: 8px; margin: 16px 0; flex-wrap: wrap; }
+form.compare label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+form.compare select { background: #11161d; color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 5px 8px; font-size: 12px; font-family: ui-monospace, monospace; }
 "#;
 
 fn serve_css() -> Response<Full<Bytes>> {
@@ -376,6 +382,51 @@ async fn render_device(
         )
     };
 
+    // Build a "compare arbitrary two backups" selector form when there are
+    // at least two backups to compare.
+    let compare_form = if entries.len() >= 2 {
+        let mut a_opts = String::new();
+        let mut b_opts = String::new();
+        for (i, e) in entries.iter().enumerate() {
+            let name = e.path.file_name().and_then(|s| s.to_str()).unwrap_or("?");
+            let label = e.created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string();
+            let selected_a = if i == 0 { " selected" } else { "" };
+            let selected_b = if i == entries.len() - 1 {
+                " selected"
+            } else {
+                ""
+            };
+            let _ = write!(
+                a_opts,
+                r#"<option value="{name_enc}"{selected_a}>{label}</option>"#,
+                name_enc = html_escape(name),
+                selected_a = selected_a,
+                label = html_escape(&label),
+            );
+            let _ = write!(
+                b_opts,
+                r#"<option value="{name_enc}"{selected_b}>{label}</option>"#,
+                name_enc = html_escape(name),
+                selected_b = selected_b,
+                label = html_escape(&label),
+            );
+        }
+        format!(
+            r#"<form method="get" action="/diff/{dev_enc}" class="compare">
+  <label>Compare</label>
+  <select name="a">{a_opts}</select>
+  →
+  <select name="b">{b_opts}</select>
+  <button type="submit">Diff</button>
+</form>"#,
+            dev_enc = url_escape(&device.name),
+            a_opts = a_opts,
+            b_opts = b_opts,
+        )
+    } else {
+        String::new()
+    };
+
     let body = format!(
         r#"<h1>{name}</h1>
 <p>
@@ -385,6 +436,7 @@ async fn render_device(
   timeout {timeout}s
 </p>
 <p>{run_button}</p>
+{compare_form}
 <h2>Backups ({count})</h2>
 <table>
 <thead><tr><th>When</th><th class="num">Size</th><th>Hash</th><th>Files</th></tr></thead>
@@ -400,6 +452,7 @@ async fn render_device(
         schedule = html_escape(&device.schedule),
         timeout = device.timeout_secs,
         run_button = run_button,
+        compare_form = compare_form,
         count = entries.len(),
         rows = rows,
     );
@@ -481,21 +534,61 @@ fn mime_for(filename: &str) -> &'static str {
 // Diff between consecutive backups
 // ---------------------------------------------------------------------------
 
-/// `GET /diff/<device>/<file>` — render a unified diff between `<file>` and
-/// the previous backup of the same device (in chronological order). Both
-/// sides are decompressed if needed and normalized (ENC blobs / PEM private
-/// keys collapsed) so the visible diff reflects *real* configuration
-/// changes, not the per-fetch re-encryption noise.
+/// Diff endpoint, two modes:
+/// - `GET /diff/<device>/<file>` — `<file>` vs the previous chronological
+///   backup of the same device (shortcut, what each row links to).
+/// - `GET /diff/<device>?a=<file_a>&b=<file_b>` — arbitrary comparison;
+///   `a` is treated as the "before" side and `b` as the "after". If the
+///   filenames come in the wrong chronological order they are swapped so
+///   the diff always reads oldest → newest.
+///
+/// Both sides are decompressed if needed and normalized (ENC blobs / PEM
+/// private keys collapsed) so the visible diff reflects *real*
+/// configuration changes.
 #[allow(clippy::result_large_err)]
 fn render_diff(
     state: &AppState,
     rest: &str,
+    query: Option<&str>,
 ) -> Result<Response<Full<Bytes>>, Response<Full<Bytes>>> {
-    let (dev_seg, file_seg) = rest
-        .split_once('/')
-        .ok_or_else(|| error_page(StatusCode::BAD_REQUEST, "Expected /diff/<device>/<file>"))?;
-    let device = decode_segment(dev_seg);
-    let file = decode_segment(file_seg);
+    let (device, prev_idx, curr_idx, entries) =
+        if let Some((dev_seg, file_seg)) = rest.split_once('/') {
+            // Shortcut mode: /diff/<device>/<file>
+            let device = decode_segment(dev_seg);
+            let file = decode_segment(file_seg);
+            let entries = load_entries(state, &device)?;
+            let idx = locate(&entries, &file)?;
+            if idx == 0 {
+                return Err(error_page(
+                    StatusCode::OK,
+                    "No previous backup to diff against — this is the oldest one.",
+                ));
+            }
+            (device, idx - 1, idx, entries)
+        } else {
+            // Arbitrary mode: /diff/<device>?a=<file>&b=<file>
+            let device = decode_segment(rest);
+            let entries = load_entries(state, &device)?;
+            let params = parse_query(query.unwrap_or(""));
+            let a = params
+                .get("a")
+                .ok_or_else(|| error_page(StatusCode::BAD_REQUEST, "missing query param `a`"))?;
+            let b = params
+                .get("b")
+                .ok_or_else(|| error_page(StatusCode::BAD_REQUEST, "missing query param `b`"))?;
+            let mut ai = locate(&entries, a)?;
+            let mut bi = locate(&entries, b)?;
+            if ai == bi {
+                return Err(error_page(
+                    StatusCode::OK,
+                    "Both selections point to the same backup — nothing to diff.",
+                ));
+            }
+            if ai > bi {
+                std::mem::swap(&mut ai, &mut bi);
+            }
+            (device, ai, bi, entries)
+        };
 
     state.cfg.find_device(&device).ok_or_else(|| {
         error_page(
@@ -504,27 +597,8 @@ fn render_diff(
         )
     })?;
 
-    let entries = storage::list_entries_for_device(&state.cfg.global.backup_dir, &device)
-        .map_err(|e| error_page(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-
-    // Locate the requested file and its immediate predecessor.
-    let idx = entries
-        .iter()
-        .position(|e| {
-            e.path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .is_some_and(|s| s == file)
-        })
-        .ok_or_else(|| error_page(StatusCode::NOT_FOUND, "Backup not found"))?;
-    if idx == 0 {
-        return Err(error_page(
-            StatusCode::OK,
-            "No previous backup to diff against — this is the oldest one.",
-        ));
-    }
-    let prev = &entries[idx - 1];
-    let curr = &entries[idx];
+    let prev = &entries[prev_idx];
+    let curr = &entries[curr_idx];
 
     let prev_text = read_normalized(&prev.path)
         .map_err(|e| error_page(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
@@ -580,6 +654,43 @@ fn read_normalized(path: &std::path::Path) -> Result<String, String> {
     };
     let normalized = crate::normalize::for_hash(&plain);
     String::from_utf8(normalized).map_err(|e| format!("invalid utf-8: {e}"))
+}
+
+#[allow(clippy::result_large_err)]
+fn load_entries(
+    state: &AppState,
+    device: &str,
+) -> Result<Vec<storage::BackupEntry>, Response<Full<Bytes>>> {
+    storage::list_entries_for_device(&state.cfg.global.backup_dir, device)
+        .map_err(|e| error_page(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))
+}
+
+#[allow(clippy::result_large_err)]
+fn locate(
+    entries: &[storage::BackupEntry],
+    filename: &str,
+) -> Result<usize, Response<Full<Bytes>>> {
+    entries
+        .iter()
+        .position(|e| {
+            e.path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s == filename)
+        })
+        .ok_or_else(|| {
+            error_page(
+                StatusCode::NOT_FOUND,
+                &format!("Backup `{filename}` not found"),
+            )
+        })
+}
+
+fn parse_query(q: &str) -> std::collections::HashMap<String, String> {
+    q.split('&')
+        .filter_map(|p| p.split_once('='))
+        .map(|(k, v)| (decode_segment(k), decode_segment(v)))
+        .collect()
 }
 
 fn gunzip(bytes: &[u8]) -> Result<Vec<u8>, std::io::Error> {
