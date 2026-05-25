@@ -15,7 +15,7 @@ RestartSec=30s
 
 # Filesystem isolation
 StateDirectory=fortibackup
-ReadWritePaths=/var/lib/fortibackup
+ReadWritePaths=/var/lib/fortibackup /etc/fortibackup
 ProtectSystem=strict
 ProtectHome=true
 NoNewPrivileges=true

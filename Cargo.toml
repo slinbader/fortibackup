@@ -1,6 +1,6 @@
 [package]
 name = "fortibackup"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.80"
 description = "Automated configuration backup tool for FortiGate devices"
@@ -36,6 +36,7 @@ toml = "0.8.19"
 
 # Scheduling
 tokio-cron-scheduler = "0.13.0"
+uuid = "1.10"
 
 # Logging
 tracing = "0.1.40"

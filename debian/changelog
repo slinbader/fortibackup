@@ -1,3 +1,23 @@
+fortibackup (0.5.0-1) unstable; urgency=medium
+
+  * feat(webui): live config editor with hot reload. New page at /config
+    shows the current /etc/fortibackup/config.toml in a textarea; saving
+    parses + validates the new TOML, backs up the previous file as
+    config.toml.bak-<unix>, writes the new one, and sends a reload event
+    to the scheduler — which tears down all current jobs and installs
+    the new ones in-process. Zero restart, no missed cron wakeups beyond
+    the few-millisecond swap.
+  * scheduler: now loops on an mpsc Receiver<Config> in addition to the
+    shutdown signal; rebuilds jobs on every received config. The shared
+    Arc<Config> is swapped atomically before tear-down so any backup that
+    fires *during* the swap reads consistent data.
+  * systemd: ReadWritePaths now includes /etc/fortibackup so the daemon
+    can rewrite config.toml under ProtectSystem=strict.
+  * chore(msrv): bump rust-version from 1.75 to 1.80 — unblocks
+    dependabot updates that already moved past 1.75.
+
+ -- Luis Herrera <luis.herrera@rnpn.gob.sv>  Mon, 25 May 2026 21:30:00 +0000
+
 fortibackup (0.4.1-1) unstable; urgency=medium
 
   * feat(webui): diff between two arbitrary backups, not just consecutive

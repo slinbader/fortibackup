@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use base64::Engine;
 use bytes::Bytes;
-use http_body_util::Full;
+use http_body_util::{BodyExt as _, Full};
 use hyper::body::Incoming;
 use hyper::header::{AUTHORIZATION, CONTENT_DISPOSITION, CONTENT_TYPE, WWW_AUTHENTICATE};
 use hyper::service::service_fn;
@@ -21,16 +21,24 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use crate::backup;
 use crate::config::Config;
+use crate::scheduler::SharedConfig;
 use crate::storage;
 
 /// Per-process state shared across all HTTP handlers. Cheap to clone.
 struct AppState {
-    cfg: Arc<Config>,
+    /// Live configuration, shared with the scheduler. Read on every
+    /// request, written on POST /config after validation.
+    shared: SharedConfig,
+    /// Path to the on-disk config.toml. Updated atomically on save.
+    config_path: std::path::PathBuf,
+    /// Channel that sends reload events to the scheduler.
+    reload_tx: Sender<Config>,
     auth_user: String,
     auth_pass: String,
     /// Devices currently being backed up via the web "Run now" button.
@@ -41,18 +49,31 @@ struct AppState {
 
 type SharedState = Arc<AppState>;
 
+impl AppState {
+    /// Clone the current `Arc<Config>` snapshot. Cheap (one atomic
+    /// refcount bump); call it once per request and use locally.
+    async fn cfg(&self) -> Arc<Config> {
+        Arc::clone(&*self.shared.lock().await)
+    }
+}
+
 /// Spawn the web UI. Returns once the listener is bound; the server runs
 /// for the lifetime of the process. Errors are surfaced as strings.
-pub async fn serve(cfg: Arc<Config>) -> Result<(), String> {
-    let Some(listen) = cfg.webui.listen.clone() else {
+pub async fn serve(
+    shared: SharedConfig,
+    config_path: std::path::PathBuf,
+    reload_tx: Sender<Config>,
+) -> Result<(), String> {
+    let snapshot: Arc<Config> = Arc::clone(&*shared.lock().await);
+    let Some(listen) = snapshot.webui.listen.clone() else {
         return Ok(());
     };
-    let user = cfg
+    let user = snapshot
         .webui
         .user
         .clone()
         .ok_or_else(|| "[webui] user is required when listen is set".to_owned())?;
-    let env_name = cfg
+    let env_name = snapshot
         .webui
         .password_env
         .clone()
@@ -72,7 +93,9 @@ pub async fn serve(cfg: Arc<Config>) -> Result<(), String> {
 
     let user_display = user.clone();
     let state: SharedState = Arc::new(AppState {
-        cfg,
+        shared,
+        config_path,
+        reload_tx,
         auth_user: user,
         auth_pass: pass,
         in_flight: Mutex::new(HashSet::new()),
@@ -125,11 +148,13 @@ async fn handle(
             render_device(&state, decode_segment(&p["/device/".len()..]).as_str()).await
         }
         (Method::GET, p) if p.starts_with("/backup/") => {
-            serve_backup(&state, &p["/backup/".len()..])
+            serve_backup(&state, &p["/backup/".len()..]).await
         }
         (Method::GET, p) if p.starts_with("/diff/") => {
-            render_diff(&state, &p["/diff/".len()..], query.as_deref())
+            render_diff(&state, &p["/diff/".len()..], query.as_deref()).await
         }
+        (Method::GET, "/config") => render_config_get(&state).await,
+        (Method::POST, "/config") => handle_config_post(&state, req).await,
         (Method::POST, p) if p.starts_with("/run/") => {
             handle_run(&state, decode_segment(&p["/run/".len()..]).as_str()).await
         }
@@ -247,11 +272,11 @@ fn page(title: &str, body: &str) -> String {
     )
 }
 
-#[allow(clippy::unused_async)] // kept symmetric with render_device
 async fn render_dashboard(state: &AppState) -> Response<Full<Bytes>> {
+    let cfg = state.cfg().await;
     let mut rows = String::new();
-    for device in &state.cfg.devices {
-        let entries = storage::list_entries_for_device(&state.cfg.global.backup_dir, &device.name)
+    for device in &cfg.devices {
+        let entries = storage::list_entries_for_device(&cfg.global.backup_dir, &device.name)
             .unwrap_or_default();
         let count = entries.len();
         let latest = entries.last();
@@ -303,10 +328,10 @@ async fn render_dashboard(state: &AppState) -> Response<Full<Bytes>> {
 <tbody>{rows}</tbody>
 </table>
 <h2>About</h2>
-<p>fortibackup v{ver} · backup dir <span class="mono">{dir}</span></p>"#,
+<p>fortibackup v{ver} · backup dir <span class="mono">{dir}</span> · <a href="/config">edit config</a></p>"#,
         rows = rows,
         ver = env!("CARGO_PKG_VERSION"),
-        dir = html_escape(&state.cfg.global.backup_dir.display().to_string()),
+        dir = html_escape(&cfg.global.backup_dir.display().to_string()),
     );
     html_response(page("Dashboard", &body))
 }
@@ -316,12 +341,12 @@ async fn render_device(
     state: &AppState,
     name: &str,
 ) -> Result<Response<Full<Bytes>>, Response<Full<Bytes>>> {
-    let device = state
-        .cfg
+    let cfg = state.cfg().await;
+    let device = cfg
         .find_device(name)
         .ok_or_else(|| error_page(StatusCode::NOT_FOUND, &format!("Device `{name}` not found")))?;
 
-    let entries = storage::list_entries_for_device(&state.cfg.global.backup_dir, &device.name)
+    let entries = storage::list_entries_for_device(&cfg.global.backup_dir, &device.name)
         .map_err(|e| error_page(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     let mut rows = String::new();
@@ -480,7 +505,7 @@ fn error_page(status: StatusCode, msg: &str) -> Response<Full<Bytes>> {
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::result_large_err)] // Response is the Err on purpose so handle() can unify branches
-fn serve_backup(
+async fn serve_backup(
     state: &AppState,
     rest: &str,
 ) -> Result<Response<Full<Bytes>>, Response<Full<Bytes>>> {
@@ -490,7 +515,8 @@ fn serve_backup(
     let device = decode_segment(dev_seg);
     let file = decode_segment(file_seg);
 
-    if state.cfg.find_device(&device).is_none() {
+    let cfg = state.cfg().await;
+    if cfg.find_device(&device).is_none() {
         return Err(error_page(
             StatusCode::NOT_FOUND,
             &format!("Device `{device}` not found"),
@@ -500,8 +526,8 @@ fn serve_backup(
     if file.contains('/') || file.contains("..") || file.starts_with('.') {
         return Err(error_page(StatusCode::BAD_REQUEST, "Invalid filename"));
     }
-    let path = storage::device_dir(&state.cfg.global.backup_dir, &device).join(&file);
-    if !path.starts_with(&state.cfg.global.backup_dir) || !path.exists() {
+    let path = storage::device_dir(&cfg.global.backup_dir, &device).join(&file);
+    if !path.starts_with(&cfg.global.backup_dir) || !path.exists() {
         return Err(error_page(StatusCode::NOT_FOUND, "Backup not found"));
     }
     let bytes = std::fs::read(&path)
@@ -546,17 +572,18 @@ fn mime_for(filename: &str) -> &'static str {
 /// private keys collapsed) so the visible diff reflects *real*
 /// configuration changes.
 #[allow(clippy::result_large_err)]
-fn render_diff(
+async fn render_diff(
     state: &AppState,
     rest: &str,
     query: Option<&str>,
 ) -> Result<Response<Full<Bytes>>, Response<Full<Bytes>>> {
+    let cfg = state.cfg().await;
     let (device, prev_idx, curr_idx, entries) =
         if let Some((dev_seg, file_seg)) = rest.split_once('/') {
             // Shortcut mode: /diff/<device>/<file>
             let device = decode_segment(dev_seg);
             let file = decode_segment(file_seg);
-            let entries = load_entries(state, &device)?;
+            let entries = load_entries(&cfg, &device)?;
             let idx = locate(&entries, &file)?;
             if idx == 0 {
                 return Err(error_page(
@@ -568,7 +595,7 @@ fn render_diff(
         } else {
             // Arbitrary mode: /diff/<device>?a=<file>&b=<file>
             let device = decode_segment(rest);
-            let entries = load_entries(state, &device)?;
+            let entries = load_entries(&cfg, &device)?;
             let params = parse_query(query.unwrap_or(""));
             let a = params
                 .get("a")
@@ -590,7 +617,7 @@ fn render_diff(
             (device, ai, bi, entries)
         };
 
-    state.cfg.find_device(&device).ok_or_else(|| {
+    cfg.find_device(&device).ok_or_else(|| {
         error_page(
             StatusCode::NOT_FOUND,
             &format!("Device `{device}` not found"),
@@ -658,10 +685,10 @@ fn read_normalized(path: &std::path::Path) -> Result<String, String> {
 
 #[allow(clippy::result_large_err)]
 fn load_entries(
-    state: &AppState,
+    cfg: &Config,
     device: &str,
 ) -> Result<Vec<storage::BackupEntry>, Response<Full<Bytes>>> {
-    storage::list_entries_for_device(&state.cfg.global.backup_dir, device)
+    storage::list_entries_for_device(&cfg.global.backup_dir, device)
         .map_err(|e| error_page(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))
 }
 
@@ -756,6 +783,132 @@ fn build_diff_html(prev: &str, curr: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Live config editor (TOML raw, hot reload)
+// ---------------------------------------------------------------------------
+
+const CONFIG_HELP: &str = "Edit the TOML below and click Save. The file is validated before writing — a parse error or schema problem aborts the save. Secrets stay in /etc/fortibackup/environment and are NOT editable here. Reload happens in-process; no restart required.";
+
+#[allow(clippy::unused_async)]
+async fn render_config_get(
+    state: &AppState,
+) -> Result<Response<Full<Bytes>>, Response<Full<Bytes>>> {
+    let raw = std::fs::read_to_string(&state.config_path).map_err(|e| {
+        error_page(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("read {}: {e}", state.config_path.display()),
+        )
+    })?;
+    Ok(html_response(render_config_page(&raw, None, None)))
+}
+
+#[allow(clippy::result_large_err)]
+async fn handle_config_post(
+    state: &AppState,
+    req: Request<Incoming>,
+) -> Result<Response<Full<Bytes>>, Response<Full<Bytes>>> {
+    // Read the form body. Limit to 1 MiB — config files are kB, this caps
+    // memory in case of a misbehaving client.
+    let collected = req
+        .into_body()
+        .collect()
+        .await
+        .map_err(|e| error_page(StatusCode::BAD_REQUEST, &format!("read body: {e}")))?;
+    let bytes = collected.to_bytes();
+    if bytes.len() > 1024 * 1024 {
+        return Err(error_page(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "config body too large (>1 MiB)",
+        ));
+    }
+    let body_str = std::str::from_utf8(&bytes)
+        .map_err(|e| error_page(StatusCode::BAD_REQUEST, &format!("body utf-8: {e}")))?;
+    let params = parse_query(body_str);
+    let new_toml = params.get("toml").cloned().unwrap_or_default();
+    if new_toml.trim().is_empty() {
+        return Err(error_page(StatusCode::BAD_REQUEST, "empty `toml` field"));
+    }
+
+    // Parse + validate (re-uses the same validation as load_config).
+    let new_cfg = match crate::config::parse_str(&new_toml) {
+        Ok(c) => c,
+        Err(err) => {
+            return Ok(html_response(render_config_page(
+                &new_toml,
+                Some(&format!("Parse / validation error: {err}")),
+                None,
+            )));
+        }
+    };
+
+    // Backup the current file before overwriting. `.toml.bak-<unix>`.
+    let ts = chrono::Utc::now().timestamp();
+    let backup_path = state.config_path.with_extension(format!("toml.bak-{ts}"));
+    if state.config_path.exists() {
+        if let Err(e) = std::fs::copy(&state.config_path, &backup_path) {
+            return Err(error_page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("backup current config: {e}"),
+            ));
+        }
+    }
+    if let Err(e) = std::fs::write(&state.config_path, &new_toml) {
+        return Err(error_page(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("write config: {e}"),
+        ));
+    }
+
+    // Send reload to the scheduler. Even if the send fails (channel
+    // closed for some reason) the new file is already on disk.
+    let reload_ok = state.reload_tx.send(new_cfg).await.is_ok();
+    let msg = if reload_ok {
+        format!(
+            "Saved. Backup of previous config kept at {}. Scheduler reloaded in-process.",
+            backup_path.display()
+        )
+    } else {
+        format!(
+            "Saved to disk (backup at {}), but live reload channel was unavailable. The next process restart will pick up the change.",
+            backup_path.display()
+        )
+    };
+    Ok(html_response(render_config_page(
+        &new_toml,
+        None,
+        Some(&msg),
+    )))
+}
+
+fn render_config_page(toml_text: &str, err: Option<&str>, ok: Option<&str>) -> String {
+    let err_block = err
+        .map(|m| format!(r#"<div class="alert err">{}</div>"#, html_escape(m)))
+        .unwrap_or_default();
+    let ok_block = ok
+        .map(|m| format!(r#"<div class="alert ok">{}</div>"#, html_escape(m)))
+        .unwrap_or_default();
+    let body = format!(
+        r#"<h1>Configuration</h1>
+{err_block}
+{ok_block}
+<p style="color: var(--muted); font-size: 12px; margin-bottom: 12px;">{help}</p>
+<form method="post" action="/config">
+  <textarea name="toml" spellcheck="false" autocomplete="off"
+    style="width: 100%; min-height: 60vh; background: #11161d; color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 12px; font-family: ui-monospace, monospace; font-size: 12px; line-height: 1.5;"
+  >{toml_escaped}</textarea>
+  <p style="margin-top: 12px;">
+    <button type="submit">Save & reload</button>
+    <a href="/" style="margin-left: 16px;">Cancel</a>
+  </p>
+</form>"#,
+        err_block = err_block,
+        ok_block = ok_block,
+        help = html_escape(CONFIG_HELP),
+        toml_escaped = html_escape(toml_text),
+    );
+    page("Configuration", &body)
+}
+
+// ---------------------------------------------------------------------------
 // Manual run trigger
 // ---------------------------------------------------------------------------
 
@@ -764,10 +917,11 @@ async fn handle_run(
     state: &AppState,
     name: &str,
 ) -> Result<Response<Full<Bytes>>, Response<Full<Bytes>>> {
-    let device =
-        state.cfg.find_device(name).cloned().ok_or_else(|| {
-            error_page(StatusCode::NOT_FOUND, &format!("Device `{name}` not found"))
-        })?;
+    let cfg = state.cfg().await;
+    let device = cfg
+        .find_device(name)
+        .cloned()
+        .ok_or_else(|| error_page(StatusCode::NOT_FOUND, &format!("Device `{name}` not found")))?;
 
     // Reserve the device. If it's already in flight, return 409.
     {
@@ -780,7 +934,7 @@ async fn handle_run(
         }
     }
 
-    let report = backup::run_for_device(&state.cfg, &device).await;
+    let report = backup::run_for_device(&cfg, &device).await;
 
     state.in_flight.lock().await.remove(name);
 

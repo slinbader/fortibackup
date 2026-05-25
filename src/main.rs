@@ -51,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     match cli.command {
-        Command::Run => cmd_run(cfg).await,
+        Command::Run => cmd_run(cfg, cli.config.clone()).await,
         Command::Once { device } => cmd_once(cfg, device).await,
         Command::List { device } => cmd_list(&cfg, device.as_deref()),
         Command::Verify => cmd_verify(cfg).await,
@@ -98,17 +98,29 @@ fn init_tracing(level: &str) {
     }
 }
 
-async fn cmd_run(cfg: Config) -> anyhow::Result<()> {
+async fn cmd_run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
     if let Some(listen) = cfg.metrics.listen.clone() {
         metrics::serve(&listen)
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
     }
+    // Shared config + reload channel are wired across scheduler and webui
+    // so the editor in the UI can hot-swap jobs without restarting.
+    let shared: scheduler::SharedConfig =
+        std::sync::Arc::new(tokio::sync::Mutex::new(std::sync::Arc::new(cfg.clone())));
+    let (reload_tx, reload_rx) = tokio::sync::mpsc::channel::<Config>(4);
     if cfg.webui.listen.is_some() {
-        let shared = std::sync::Arc::new(cfg.clone());
-        webui::serve(shared).await.map_err(|e| anyhow::anyhow!(e))?;
+        webui::serve(
+            std::sync::Arc::clone(&shared),
+            config_path,
+            reload_tx.clone(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
     }
-    scheduler::run(cfg).await.map_err(anyhow::Error::from)
+    scheduler::run(cfg, shared, reload_rx)
+        .await
+        .map_err(anyhow::Error::from)
 }
 
 async fn cmd_once(cfg: Config, device: Option<String>) -> anyhow::Result<()> {
