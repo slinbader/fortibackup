@@ -35,7 +35,7 @@ serde_json = "1.0.132"
 toml = "0.8.19"
 
 # Scheduling
-tokio-cron-scheduler = "0.13.0"
+tokio-cron-scheduler = "0.15.1"
 uuid = "1.10"
 
 # Logging
