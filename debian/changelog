@@ -1,3 +1,14 @@
+fortibackup (0.5.1-1) unstable; urgency=medium
+
+  * fix(webui): decode `+` as space in form-urlencoded POST bodies. The
+    /config save handler treated `+` literally instead of as a space (the
+    encoding browsers use for spaces in application/x-www-form-urlencoded),
+    which made every save fail TOML validation with errors like
+    `backup_dir+=+"/var/lib/fortibackup"`. Path segments still treat `+`
+    literally — only form fields convert. Caught on first real save attempt.
+
+ -- Luis Herrera <luis.herrera@rnpn.gob.sv>  Mon, 25 May 2026 21:50:00 +0000
+
 fortibackup (0.5.0-1) unstable; urgency=medium
 
   * feat(webui): live config editor with hot reload. New page at /config

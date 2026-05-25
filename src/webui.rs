@@ -716,8 +716,16 @@ fn locate(
 fn parse_query(q: &str) -> std::collections::HashMap<String, String> {
     q.split('&')
         .filter_map(|p| p.split_once('='))
-        .map(|(k, v)| (decode_segment(k), decode_segment(v)))
+        .map(|(k, v)| (decode_form(k), decode_form(v)))
         .collect()
+}
+
+/// Decode a single application/x-www-form-urlencoded field: first turn
+/// `+` into spaces (which is what the form encoding mandates), then run
+/// percent-decoding. Path segments use `decode_segment` instead, where
+/// `+` is a literal character.
+fn decode_form(s: &str) -> String {
+    decode_segment(&s.replace('+', " "))
 }
 
 fn gunzip(bytes: &[u8]) -> Result<Vec<u8>, std::io::Error> {
@@ -1057,6 +1065,18 @@ mod tests {
         let enc = url_escape(original);
         let dec = decode_segment(&enc);
         assert_eq!(dec, original);
+    }
+
+    #[test]
+    fn form_body_decoding_handles_plus_as_space() {
+        // Real browser POST encodes `backup_dir = "/x"` as
+        // backup_dir+%3D+%22%2Fx%22  (note: `+` for spaces, %3D for =).
+        let body = "toml=backup_dir+%3D+%22%2Fx%22";
+        let parsed = parse_query(body);
+        assert_eq!(
+            parsed.get("toml").map(String::as_str),
+            Some(r#"backup_dir = "/x""#)
+        );
     }
 
     #[test]
