@@ -10,7 +10,7 @@ git clone https://github.com/lherrera/fortibackup.git
 cd fortibackup
 
 # Toolchain (rustup is the supported way)
-rustup show         # ensure stable >= 1.75
+rustup show         # ensure stable >= 1.80
 
 # Run the quality gate locally — CI runs exactly these:
 cargo fmt --all --check

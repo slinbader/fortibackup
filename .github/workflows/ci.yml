@@ -44,7 +44,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        toolchain: [stable, "1.75"]
+        toolchain: [stable, "1.80"]
     steps:
       - uses: actions/checkout@v4
       - name: Install rust toolchain

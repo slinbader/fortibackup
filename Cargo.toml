@@ -2,7 +2,7 @@
 name = "fortibackup"
 version = "0.4.1"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.80"
 description = "Automated configuration backup tool for FortiGate devices"
 license = "MIT"
 authors = ["Luis Herrera <luis.herrera1974@gmail.com>"]
