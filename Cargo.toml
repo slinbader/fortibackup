@@ -31,12 +31,12 @@ clap_mangen = "0.2.24"
 
 # Config
 serde = { version = "1.0.213", features = ["derive"] }
-serde_json = "1.0.132"
+serde_json = "1.0.150"
 toml = "0.8.19"
 
 # Scheduling
 tokio-cron-scheduler = "0.13.0"
-uuid = "1.10"
+uuid = "1.23"
 
 # Logging
 tracing = "0.1.40"
@@ -71,7 +71,7 @@ http-body-util = "0.1.2"
 bytes = "1.7.2"
 
 # S3 / S3-compatible (MinIO) mirror destination
-aws-config = { version = "1.5.10", default-features = false, features = ["rustls", "behavior-version-latest", "rt-tokio"] }
+aws-config = { version = "1.8.17", default-features = false, features = ["rustls", "behavior-version-latest", "rt-tokio"] }
 aws-sdk-s3 = { version = "1.59.0", default-features = false, features = ["rustls", "behavior-version-latest", "rt-tokio"] }
 aws-credential-types = "1.2.1"
 
