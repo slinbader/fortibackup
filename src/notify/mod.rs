@@ -19,6 +19,10 @@ pub enum Status {
     Success,
     Failed,
     NoChange,
+    /// A device has had no successful backup within the watchdog window.
+    Stale,
+    /// A previously stale device has backed up successfully again.
+    Recovered,
 }
 
 impl Status {
@@ -27,6 +31,8 @@ impl Status {
             Status::Success => "success",
             Status::Failed => "failed",
             Status::NoChange => "no_change",
+            Status::Stale => "stale",
+            Status::Recovered => "recovered",
         }
     }
 }
@@ -73,8 +79,10 @@ impl NotificationEvent {
 /// Dispatch `event` to all configured channels in parallel. Errors are logged
 /// and never returned.
 pub async fn dispatch(cfg: &NotificationsConfig, event: &NotificationEvent) {
+    // Stale/Recovered alerts ride the on_failure channels: they are the
+    // attention-worthy events, and that's where the operator is watching.
     let channels: &[String] = match event.status {
-        Status::Failed => &cfg.on_failure,
+        Status::Failed | Status::Stale | Status::Recovered => &cfg.on_failure,
         Status::Success | Status::NoChange => &cfg.on_success,
     };
     if channels.is_empty() {

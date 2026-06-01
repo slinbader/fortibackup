@@ -26,7 +26,73 @@ pub struct Config {
     #[serde(default)]
     pub webui: WebUiConfig,
     #[serde(default)]
+    pub watchdog: WatchdogConfig,
+    #[serde(default)]
     pub devices: Vec<Device>,
+}
+
+/// Backup-overdue watchdog. When enabled, a background task checks each
+/// device's last *successful* backup and alerts (via the same channels as
+/// `notifications.on_failure`) when one goes stale. This catches the silent
+/// failure case: the scheduler stopped firing, the host was down, or a device
+/// became unreachable for longer than expected — none of which produce a
+/// failed-fetch alert because no fetch was even attempted.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WatchdogConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Alert when a device has had no successful backup within this window,
+    /// e.g. `"26h"`, `"2d"`. Required when `enabled = true`.
+    pub stale_after: Option<String>,
+    /// How often the watchdog re-checks. Defaults to `"1h"`.
+    #[serde(default = "default_watchdog_interval")]
+    pub check_interval: String,
+}
+
+// Manual `Default` (rather than derive) so an absent `[watchdog]` block and a
+// present block with a missing `check_interval` both resolve to "1h".
+impl Default for WatchdogConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            stale_after: None,
+            check_interval: default_watchdog_interval(),
+        }
+    }
+}
+
+fn default_watchdog_interval() -> String {
+    "1h".to_owned()
+}
+
+impl WatchdogConfig {
+    /// Parse `stale_after` into a [`std::time::Duration`].
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::Invalid`] if the field is unset or not a valid
+    /// humantime duration.
+    pub fn stale_after_duration(&self) -> Result<std::time::Duration, ConfigError> {
+        let raw = self.stale_after.as_deref().ok_or_else(|| {
+            ConfigError::Invalid("watchdog.stale_after is required when enabled".to_owned())
+        })?;
+        humantime::parse_duration(raw).map_err(|e| {
+            ConfigError::Invalid(format!("watchdog.stale_after `{raw}` is invalid: {e}"))
+        })
+    }
+
+    /// Parse `check_interval` into a [`std::time::Duration`].
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::Invalid`] if the field is not a valid humantime
+    /// duration.
+    pub fn check_interval_duration(&self) -> Result<std::time::Duration, ConfigError> {
+        humantime::parse_duration(&self.check_interval).map_err(|e| {
+            ConfigError::Invalid(format!(
+                "watchdog.check_interval `{}` is invalid: {e}",
+                self.check_interval
+            ))
+        })
+    }
 }
 
 /// Embedded read-mostly web UI. Active only under the `run` daemon, behind
@@ -245,6 +311,20 @@ fn validate(cfg: &Config) -> Result<(), ConfigError> {
         ));
     }
 
+    if cfg.watchdog.enabled {
+        // Validate both durations up front so a bad value fails at load time
+        // rather than silently disabling the watchdog at runtime.
+        cfg.watchdog.stale_after_duration()?;
+        cfg.watchdog.check_interval_duration()?;
+        if cfg.notifications.on_failure.is_empty() {
+            return Err(ConfigError::Invalid(
+                "watchdog.enabled = true but notifications.on_failure is empty — \
+                 overdue alerts would have nowhere to go"
+                    .to_owned(),
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -394,6 +474,132 @@ backup_dir = "/tmp"
 
 [notifications]
 on_failure = ["email"]
+
+[[devices]]
+name = "x"
+host = "1.1.1.1"
+port = 443
+method = "api"
+api_token_env = "T"
+schedule = "0 0 2 * * *"
+"#;
+        let err = parse_str(raw).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid(_)));
+    }
+
+    #[test]
+    fn parses_watchdog_block() {
+        let raw = r#"
+[global]
+backup_dir = "/tmp"
+
+[notifications]
+on_failure = ["email"]
+
+[notifications.email]
+smtp_host = "smtp.gmail.com"
+smtp_port = 587
+smtp_user = "u@x.com"
+smtp_password_env = "P"
+from = "u@x.com"
+to = ["ops@x.com"]
+
+[watchdog]
+enabled = true
+stale_after = "26h"
+check_interval = "30m"
+
+[[devices]]
+name = "x"
+host = "1.1.1.1"
+port = 443
+method = "api"
+api_token_env = "T"
+schedule = "0 0 2 * * *"
+"#;
+        let cfg = parse_str(raw).expect("parse");
+        assert!(cfg.watchdog.enabled);
+        assert_eq!(
+            cfg.watchdog.stale_after_duration().unwrap(),
+            std::time::Duration::from_secs(26 * 3600)
+        );
+        assert_eq!(
+            cfg.watchdog.check_interval_duration().unwrap(),
+            std::time::Duration::from_secs(30 * 60)
+        );
+    }
+
+    #[test]
+    fn watchdog_defaults_when_absent() {
+        let cfg = parse_str(MINIMAL_API).expect("parse");
+        assert!(!cfg.watchdog.enabled);
+        assert_eq!(cfg.watchdog.check_interval, "1h");
+    }
+
+    #[test]
+    fn rejects_watchdog_enabled_without_stale_after() {
+        let raw = r#"
+[global]
+backup_dir = "/tmp"
+
+[notifications]
+on_failure = ["webhook"]
+
+[notifications.webhook]
+url = "https://example.com/hook"
+
+[watchdog]
+enabled = true
+
+[[devices]]
+name = "x"
+host = "1.1.1.1"
+port = 443
+method = "api"
+api_token_env = "T"
+schedule = "0 0 2 * * *"
+"#;
+        let err = parse_str(raw).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid(_)));
+    }
+
+    #[test]
+    fn rejects_watchdog_enabled_without_notification_channel() {
+        let raw = r#"
+[global]
+backup_dir = "/tmp"
+
+[watchdog]
+enabled = true
+stale_after = "26h"
+
+[[devices]]
+name = "x"
+host = "1.1.1.1"
+port = 443
+method = "api"
+api_token_env = "T"
+schedule = "0 0 2 * * *"
+"#;
+        let err = parse_str(raw).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid(_)));
+    }
+
+    #[test]
+    fn rejects_watchdog_bad_duration() {
+        let raw = r#"
+[global]
+backup_dir = "/tmp"
+
+[notifications]
+on_failure = ["webhook"]
+
+[notifications.webhook]
+url = "https://example.com/hook"
+
+[watchdog]
+enabled = true
+stale_after = "soon"
 
 [[devices]]
 name = "x"

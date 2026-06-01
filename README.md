@@ -21,6 +21,8 @@ fills the gap with a small, auditable, dependency-light service:
 - hashes the result and stores **only changes**, with a JSON sidecar
 - enforces retention (`N` days, but always keep at least `M` copies)
 - notifies via email and/or webhook on failure
+- optional overdue-backup watchdog catches the *silent* case (no fetch was
+  even attempted) by tracking the last successful run per device
 - runs on a per-device cron schedule
 
 ## Requirements

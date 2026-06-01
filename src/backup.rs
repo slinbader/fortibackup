@@ -86,7 +86,9 @@ pub async fn run_for_device(cfg: &Config, device: &Device) -> BackupReport {
     let status_label = match report.status {
         Status::Success => "success",
         Status::NoChange => "no_change",
-        Status::Failed => "failed",
+        // Stale/Recovered are emitted by the watchdog, never by a backup run,
+        // but the match must stay exhaustive.
+        Status::Failed | Status::Stale | Status::Recovered => "failed",
     };
     #[allow(clippy::cast_precision_loss)]
     crate::metrics::record_outcome(
@@ -187,6 +189,13 @@ async fn execute(cfg: &Config, device: &Device) -> Result<PipelineOutcome, Backu
         Err(err) => {
             warn!(device = %device.name, error = %err, "retention cleanup failed");
         }
+    }
+
+    // Record the successful run regardless of `changed` — a no_change run is
+    // still a healthy backup, and the watchdog must see it to avoid a false
+    // overdue alert.
+    if let Err(err) = storage::record_success(&cfg.global.backup_dir, &device.name, Utc::now()) {
+        warn!(device = %device.name, error = %err, "failed to record last-success marker");
     }
 
     Ok(PipelineOutcome {

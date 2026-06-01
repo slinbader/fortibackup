@@ -25,6 +25,11 @@ use crate::transport::BackupArtifact;
 const COMPRESSED_EXT: &str = "conf.gz";
 const PLAIN_EXT: &str = "conf";
 
+/// Marker file recording the last *successful* backup for a device. It is a
+/// dotfile so it is never picked up by `classify_backup_filename` (and thus
+/// never listed or pruned by retention).
+const LAST_SUCCESS_FILE: &str = ".last_success";
+
 /// Sidecar metadata stored alongside each `.conf` backup file.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BackupMetadata {
@@ -91,6 +96,41 @@ fn io_err(path: &Path, source: std::io::Error) -> StorageError {
         path: path.to_path_buf(),
         source,
     }
+}
+
+/// Record the time of a successful backup for a device.
+///
+/// This is written on *every* successful run — including `no_change` runs
+/// where the dedup logic writes no new `.conf` file. The watchdog reads this
+/// marker rather than the newest file's timestamp, because under dedup the
+/// newest file can be days old even while backups keep succeeding.
+///
+/// # Errors
+/// Returns [`StorageError`] if the device directory cannot be created or the
+/// marker cannot be written.
+pub fn record_success(
+    backup_dir: &Path,
+    device_name: &str,
+    at: DateTime<Utc>,
+) -> Result<(), StorageError> {
+    let dir = device_dir(backup_dir, device_name);
+    std::fs::create_dir_all(&dir).map_err(|e| io_err(&dir, e))?;
+    let path = dir.join(LAST_SUCCESS_FILE);
+    std::fs::write(&path, at.to_rfc3339()).map_err(|e| io_err(&path, e))
+}
+
+/// Read the last successful backup time for a device, if recorded.
+///
+/// Returns `None` when the marker is absent (a device that has never backed
+/// up) or unreadable/corrupt — the watchdog treats `None` as "no baseline yet"
+/// and stays quiet rather than alarming on a brand-new device.
+#[must_use]
+pub fn last_success_at(backup_dir: &Path, device_name: &str) -> Option<DateTime<Utc>> {
+    let path = device_dir(backup_dir, device_name).join(LAST_SUCCESS_FILE);
+    let raw = std::fs::read_to_string(path).ok()?;
+    DateTime::parse_from_rfc3339(raw.trim())
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc))
 }
 
 /// Returns the most recent stored sha256 for a device, if any.
@@ -507,6 +547,31 @@ mod tests {
         let h = latest_hash(dir.path(), "fgt-a").unwrap().unwrap();
         // latest_hash now returns the dedup-normalized hash, not the raw one.
         assert_eq!(h, sha256_hex(&normalize::for_hash(b"second")));
+    }
+
+    #[test]
+    fn last_success_marker_round_trips() {
+        let dir = TempDir::new().unwrap();
+        assert!(last_success_at(dir.path(), "fgt-a").is_none());
+
+        let at = DateTime::parse_from_rfc3339("2026-05-28T13:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        record_success(dir.path(), "fgt-a", at).unwrap();
+        assert_eq!(last_success_at(dir.path(), "fgt-a"), Some(at));
+    }
+
+    #[test]
+    fn last_success_marker_is_not_listed_as_backup() {
+        let dir = TempDir::new().unwrap();
+        let now = Utc::now();
+        save_backup(dir.path(), "fgt-a", "api", &art(b"config\n", now), false).unwrap();
+        record_success(dir.path(), "fgt-a", now).unwrap();
+
+        // The dotfile marker must not appear among backup entries.
+        let entries = list_entries_for_device(dir.path(), "fgt-a").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].path.to_string_lossy().ends_with(".conf"));
     }
 
     #[test]

@@ -951,7 +951,11 @@ async fn handle_run(
     let (label, css_class) = match report.status {
         crate::notify::Status::Success => ("Backup written (changed)", "ok"),
         crate::notify::Status::NoChange => ("Backup OK (no change)", "ok"),
-        crate::notify::Status::Failed => ("Backup failed", "err"),
+        // A manual run never yields Stale/Recovered (those are watchdog-only),
+        // but the match must stay exhaustive.
+        crate::notify::Status::Failed
+        | crate::notify::Status::Stale
+        | crate::notify::Status::Recovered => ("Backup failed", "err"),
     };
     let detail = format!(
         "duration {} ms · bytes {} · hash {}",

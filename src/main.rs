@@ -23,7 +23,7 @@ use tracing_subscriber::EnvFilter;
 
 use fortibackup::cli::{Cli, Command};
 use fortibackup::config::{self, load_config, Config};
-use fortibackup::{backup, metrics, notify, scheduler, storage, transport, webui};
+use fortibackup::{backup, metrics, notify, scheduler, storage, transport, watchdog, webui};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -117,6 +117,17 @@ async fn cmd_run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result
         )
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
+    }
+    if cfg.watchdog.enabled {
+        let interval = cfg
+            .watchdog
+            .check_interval_duration()
+            .map_err(|e| anyhow::anyhow!(e))?;
+        watchdog::spawn(std::sync::Arc::clone(&shared), interval);
+        info!(
+            stale_after = ?cfg.watchdog.stale_after,
+            "backup-overdue watchdog enabled"
+        );
     }
     scheduler::run(cfg, shared, reload_rx)
         .await

@@ -1,3 +1,25 @@
+fortibackup (0.6.0-1) unstable; urgency=medium
+
+  * feat(watchdog): backup-overdue detection. A new optional [watchdog]
+    block enables a background task that periodically checks each device's
+    last *successful* backup time and alerts (over notifications.on_failure
+    channels) when one goes stale. This catches the silent failure case a
+    failed-fetch alert can't: scheduler stopped, host went down, device
+    became unreachable for longer than expected — no fetch was attempted,
+    so nothing "failed".
+  * storage: a `.last_success` dotfile is written under each device's
+    directory on every successful run, including no_change runs. The
+    watchdog reads this marker rather than the newest file's mtime,
+    because under dedup the newest file can be days old even while
+    backups keep succeeding — measuring against it would produce a daily
+    false alarm. The dotfile is invisible to listings and retention.
+  * notify: two new statuses — Stale and Recovered. Both ride the
+    on_failure channels: stale fires once on threshold crossing, re-fires
+    at most every 24h while the device remains stale, and a one-shot
+    recovery notice is sent when backups resume.
+
+ -- Luis Herrera <luis.herrera@rnpn.gob.sv>  Mon, 01 Jun 2026 14:00:00 +0000
+
 fortibackup (0.5.1-1) unstable; urgency=medium
 
   * fix(webui): decode `+` as space in form-urlencoded POST bodies. The
