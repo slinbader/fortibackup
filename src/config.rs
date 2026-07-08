@@ -28,7 +28,41 @@ pub struct Config {
     #[serde(default)]
     pub watchdog: WatchdogConfig,
     #[serde(default)]
+    pub report: ReportConfig,
+    #[serde(default)]
     pub devices: Vec<Device>,
+}
+
+/// Institutional header used by the monthly backup report in the web UI. The
+/// report is evidence handed to management, so the organization name and
+/// subtitle are configurable here rather than hard-coded in the binary.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReportConfig {
+    /// Organization name shown as the report letterhead, e.g. `"RNPN"`.
+    #[serde(default = "default_report_org")]
+    pub org_name: String,
+    /// Second line under the org name, e.g. `"Dirección de TICs"`.
+    #[serde(default = "default_report_subtitle")]
+    pub subtitle: String,
+}
+
+// Manual `Default` (rather than derive) so an absent `[report]` block and a
+// present block missing either field both resolve to the same institutional
+// defaults.
+impl Default for ReportConfig {
+    fn default() -> Self {
+        Self {
+            org_name: default_report_org(),
+            subtitle: default_report_subtitle(),
+        }
+    }
+}
+
+fn default_report_org() -> String {
+    "RNPN".to_owned()
+}
+fn default_report_subtitle() -> String {
+    "Unidad de Redes y Ciberseguridad".to_owned()
 }
 
 /// Backup-overdue watchdog. When enabled, a background task checks each

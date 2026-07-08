@@ -9,20 +9,22 @@ use std::collections::HashSet;
 use std::convert::Infallible;
 use std::fmt::Write as _;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use base64::Engine;
 use bytes::Bytes;
+use chrono::{DateTime, Datelike, TimeZone, Utc};
 use http_body_util::{BodyExt as _, Full};
 use hyper::body::Incoming;
-use hyper::header::{AUTHORIZATION, CONTENT_DISPOSITION, CONTENT_TYPE, WWW_AUTHENTICATE};
+use hyper::header::{
+    AUTHORIZATION, CONTENT_DISPOSITION, CONTENT_TYPE, HOST, ORIGIN, REFERER, WWW_AUTHENTICATE,
+};
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use crate::backup;
@@ -140,6 +142,17 @@ async fn handle(
     let path = req.uri().path().to_owned();
     let query = req.uri().query().map(str::to_owned);
 
+    // CSRF defense: state-changing POSTs must originate from our own origin.
+    // A cross-site page could otherwise POST to /run or /config riding on the
+    // browser's cached Basic-Auth credentials. Checked before the match so
+    // dispatch can still consume `method`.
+    if method == Method::POST && !same_origin(req.headers()) {
+        return Ok(error_page(
+            StatusCode::FORBIDDEN,
+            "cross-origin POST rejected (CSRF protection)",
+        ));
+    }
+
     let result: Result<Response<Full<Bytes>>, Response<Full<Bytes>>> = match (method, path.as_str())
     {
         (Method::GET, "/") => Ok(render_dashboard(&state).await),
@@ -153,6 +166,8 @@ async fn handle(
         (Method::GET, p) if p.starts_with("/diff/") => {
             render_diff(&state, &p["/diff/".len()..], query.as_deref()).await
         }
+        (Method::GET, "/report") => Ok(render_report(&state, query.as_deref()).await),
+        (Method::GET, "/report.csv") => Ok(serve_report_csv(&state, query.as_deref()).await),
         (Method::GET, "/config") => render_config_get(&state).await,
         (Method::POST, "/config") => handle_config_post(&state, req).await,
         (Method::POST, p) if p.starts_with("/run/") => {
@@ -200,6 +215,43 @@ fn challenge() -> Response<Full<Bytes>> {
         .expect("auth challenge")
 }
 
+/// Header-based CSRF check for state-changing requests.
+///
+/// A browser attaches an `Origin` (and usually `Referer`) header to cross-site
+/// form submissions; requiring that header's host to match the `Host` we were
+/// reached on blocks a malicious page from POSTing with the browser's cached
+/// Basic-Auth credentials. Non-browser clients (curl, scripts) that send
+/// neither header are allowed — they must supply credentials explicitly and so
+/// are not a CSRF vector. A request with no `Host` header is rejected.
+fn same_origin(headers: &hyper::HeaderMap) -> bool {
+    let Some(host) = headers.get(HOST).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    // Prefer Origin; fall back to Referer. Treat the opaque `null` origin as
+    // absent so it falls through to Referer.
+    let source = headers
+        .get(ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| *s != "null")
+        .or_else(|| headers.get(REFERER).and_then(|v| v.to_str().ok()));
+    match source {
+        None => true,
+        Some(url) => host_of(url).is_some_and(|h| h == host),
+    }
+}
+
+/// Extract the `host[:port]` authority from an absolute URL, without pulling in
+/// a URL-parsing dependency. `http://user@host:8888/path?x` → `host:8888`.
+fn host_of(url: &str) -> Option<String> {
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    (!authority.is_empty()).then(|| authority.to_owned())
+}
+
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
@@ -240,6 +292,45 @@ pre { background: #11161d; padding: 12px; border-radius: 4px; overflow-x: auto; 
 form.compare { display: flex; align-items: center; gap: 8px; margin: 16px 0; flex-wrap: wrap; }
 form.compare label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
 form.compare select { background: #11161d; color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 5px 8px; font-size: 12px; font-family: ui-monospace, monospace; }
+.report { background: #fff; color: #333344; max-width: 8.5in; margin: 0 auto 24px; font-family: Helvetica, Arial, sans-serif; box-shadow: 0 0 0 1px rgba(0,0,0,0.15); -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.report .band { background: #001F5B; color: #fff; padding: 16px 22px; display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.report .band .org { font-size: 22px; font-weight: 700; letter-spacing: 0.02em; }
+.report .band .inst { color: #D6E4F7; font-size: 12px; margin-top: 2px; }
+.report .band .title { font-size: 14px; margin-top: 10px; }
+.report .band .period { text-align: right; white-space: nowrap; }
+.report .band .period .lbl { color: #D6E4F7; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; }
+.report .band .period .val { font-weight: 700; font-size: 13px; margin-top: 3px; }
+.report .content { padding: 16px 22px 8px; }
+.report h2 { color: #001F5B; font-size: 14px; font-weight: 700; text-transform: none; letter-spacing: 0; margin: 20px 0 6px; border-bottom: 1.5px solid #0045A0; padding-bottom: 6px; }
+.report .meta { color: #555566; font-size: 12px; margin: 0 0 4px; }
+.report table { width: 100%; border-collapse: collapse; margin: 8px 0 14px; }
+.report thead th { background: #0045A0; color: #fff; font-weight: 700; font-size: 11px; text-transform: none; letter-spacing: 0; text-align: left; padding: 7px 8px; border: 0.5px solid #CCCCDD; border-bottom: 2px solid #001F5B; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.report tbody td { border: 0.5px solid #CCCCDD; padding: 6px 8px; font-size: 12px; color: #333344; }
+.report tbody td.num, .report thead th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.report tbody tr:nth-child(even) td { background: #F2F5FA; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.report .mono { font-family: "Courier New", monospace; font-size: 11px; }
+.report .badge { font-weight: 700; font-size: 11px; }
+.report .badge.ok { color: #007A33; }
+.report .badge.warn { color: #CC7700; }
+.report .badge.err { color: #CC0000; }
+.report .note { color: #555566; font-size: 11px; font-style: italic; }
+.report ul.concl { margin: 6px 0 14px; padding-left: 18px; }
+.report ul.concl li { font-size: 12px; margin-bottom: 5px; color: #333344; }
+.report .sign { margin: 44px 0 20px; display: flex; justify-content: space-around; gap: 48px; }
+.report .sign .slot { text-align: center; flex: 1; color: #333344; font-size: 12px; }
+.report .sign .line { border-top: 1px solid #333344; margin: 0 0 6px; padding-top: 6px; }
+.report .foot { text-align: center; color: #8888AA; font-size: 11px; border-top: 0.5px solid #0045A0; margin: 18px 22px 0; padding: 8px 0 16px; }
+.report .empty { color: #8888AA; font-style: italic; }
+.toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 0 0 16px; }
+.toolbar input[type=month] { background: #11161d; color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 5px 8px; font-size: 12px; }
+@media print {
+  body { background: #fff; padding: 0; }
+  header, .noprint, .toolbar { display: none !important; }
+  .report { max-width: none; margin: 0; box-shadow: none; }
+  a { color: #001F5B; text-decoration: none; }
+  table { page-break-inside: auto; }
+  tr { page-break-inside: avoid; }
+}
 "#;
 
 fn serve_css() -> Response<Full<Bytes>> {
@@ -328,7 +419,7 @@ async fn render_dashboard(state: &AppState) -> Response<Full<Bytes>> {
 <tbody>{rows}</tbody>
 </table>
 <h2>About</h2>
-<p>fortibackup v{ver} · backup dir <span class="mono">{dir}</span> · <a href="/config">edit config</a></p>"#,
+<p>fortibackup v{ver} · backup dir <span class="mono">{dir}</span> · <a href="/report">informe mensual</a> · <a href="/config">edit config</a></p>"#,
         rows = rows,
         ver = env!("CARGO_PKG_VERSION"),
         dir = html_escape(&cfg.global.backup_dir.display().to_string()),
@@ -397,7 +488,10 @@ async fn render_device(
         );
     }
 
-    let in_flight = state.in_flight.lock().await.contains(&device.name);
+    let in_flight = state
+        .in_flight
+        .lock()
+        .is_ok_and(|set| set.contains(&device.name));
     let run_button = if in_flight {
         "<button disabled>Run now (in flight…)</button>".to_owned()
     } else {
@@ -920,6 +1014,23 @@ fn render_config_page(toml_text: &str, err: Option<&str>, ok: Option<&str>) -> S
 // Manual run trigger
 // ---------------------------------------------------------------------------
 
+/// Releases an in-flight reservation when dropped, so a panic mid-backup can't
+/// leave a device permanently marked "running" (which would disable its Run-now
+/// button until the process restarts). Uses a std Mutex because the guard is
+/// only ever locked briefly for insert/remove, never held across an `.await`.
+struct FlightGuard<'a> {
+    set: &'a Mutex<HashSet<String>>,
+    name: String,
+}
+
+impl Drop for FlightGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut set) = self.set.lock() {
+            set.remove(&self.name);
+        }
+    }
+}
+
 #[allow(clippy::result_large_err)]
 async fn handle_run(
     state: &AppState,
@@ -933,7 +1044,10 @@ async fn handle_run(
 
     // Reserve the device. If it's already in flight, return 409.
     {
-        let mut flight = state.in_flight.lock().await;
+        let mut flight = state
+            .in_flight
+            .lock()
+            .map_err(|_| error_page(StatusCode::INTERNAL_SERVER_ERROR, "in-flight lock poisoned"))?;
         if !flight.insert(name.to_owned()) {
             return Err(error_page(
                 StatusCode::CONFLICT,
@@ -942,9 +1056,14 @@ async fn handle_run(
         }
     }
 
-    let report = backup::run_for_device(&cfg, &device).await;
+    // Release the reservation on every exit path — including an unwind from a
+    // panic inside the backup — so a device can never get stuck "in flight".
+    let _guard = FlightGuard {
+        set: &state.in_flight,
+        name: name.to_owned(),
+    };
 
-    state.in_flight.lock().await.remove(name);
+    let report = backup::run_for_device(&cfg, &device).await;
 
     // Render result inline rather than redirecting — keeps the flow simple
     // and avoids cross-request state.
@@ -982,6 +1101,337 @@ async fn handle_run(
         ),
     );
     Ok(html_response(body))
+}
+
+// ---------------------------------------------------------------------------
+// Monthly backup report (on-screen + printable PDF, plus CSV export)
+// ---------------------------------------------------------------------------
+
+/// Parse `?month=YYYY-MM` into `(year, month)`, falling back to the current UTC
+/// month when the param is absent or malformed.
+fn parse_month(query: Option<&str>) -> (i32, u32) {
+    if let Some(q) = query {
+        if let Some(raw) = parse_query(q).get("month") {
+            if let Some((y, m)) = raw.split_once('-') {
+                if let (Ok(y), Ok(m)) = (y.parse::<i32>(), m.parse::<u32>()) {
+                    if (1..=12).contains(&m) {
+                        return (y, m);
+                    }
+                }
+            }
+        }
+    }
+    let now = Utc::now();
+    (now.year(), now.month())
+}
+
+/// Half-open UTC interval `[start, end)` covering the given calendar month.
+fn month_bounds(year: i32, month: u32) -> (DateTime<Utc>, DateTime<Utc>) {
+    let start = Utc
+        .with_ymd_and_hms(year, month, 1, 0, 0, 0)
+        .single()
+        .unwrap_or_else(Utc::now);
+    let (ny, nm) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    let end = Utc
+        .with_ymd_and_hms(ny, nm, 1, 0, 0, 0)
+        .single()
+        .unwrap_or_else(Utc::now);
+    (start, end)
+}
+
+fn month_name_es(month: u32) -> &'static str {
+    const NAMES: [&str; 12] = [
+        "enero",
+        "febrero",
+        "marzo",
+        "abril",
+        "mayo",
+        "junio",
+        "julio",
+        "agosto",
+        "septiembre",
+        "octubre",
+        "noviembre",
+        "diciembre",
+    ];
+    NAMES
+        .get((month as usize).wrapping_sub(1))
+        .copied()
+        .unwrap_or("—")
+}
+
+/// All stored backup entries whose timestamp falls in `[start, end)`, sorted by
+/// time then device name. Each entry is a stored configuration snapshot — the
+/// tangible artifact that proves a backup ran and captured a specific state.
+fn entries_in_month(
+    cfg: &Config,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Vec<storage::BackupEntry> {
+    let mut entries: Vec<storage::BackupEntry> =
+        storage::list_all_entries(&cfg.global.backup_dir)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e.created_at >= start && e.created_at < end)
+            .collect();
+    entries.sort_by(|a, b| {
+        a.created_at
+            .cmp(&b.created_at)
+            .then_with(|| a.device.cmp(&b.device))
+    });
+    entries
+}
+
+async fn render_report(state: &AppState, query: Option<&str>) -> Response<Full<Bytes>> {
+    let cfg = state.cfg().await;
+    let (year, month) = parse_month(query);
+    let (start, end) = month_bounds(year, month);
+    let entries = entries_in_month(&cfg, start, end);
+
+    // Device set = configured devices, plus any extra directory that holds
+    // backups this month (e.g. a device renamed/removed from the config but
+    // whose historical artifacts still count as evidence).
+    let mut dev_names: Vec<String> = cfg.devices.iter().map(|d| d.name.clone()).collect();
+    for e in &entries {
+        if !dev_names.iter().any(|n| n == &e.device) {
+            dev_names.push(e.device.clone());
+        }
+    }
+
+    let mut summary = String::new();
+    for name in &dev_names {
+        let dev_entries: Vec<&storage::BackupEntry> =
+            entries.iter().filter(|e| &e.device == name).collect();
+        let count = dev_entries.len();
+        let total: u64 = dev_entries.iter().map(|e| e.size_bytes).sum();
+        let first = dev_entries
+            .first()
+            .map_or_else(|| "—".to_owned(), |e| e.created_at.format("%Y-%m-%d %H:%M").to_string());
+        let last = dev_entries
+            .last()
+            .map_or_else(|| "—".to_owned(), |e| e.created_at.format("%Y-%m-%d %H:%M").to_string());
+        let last_success = storage::last_success_at(&cfg.global.backup_dir, name).map_or_else(
+            || "—".to_owned(),
+            |t| t.format("%Y-%m-%d %H:%M").to_string(),
+        );
+        let badge = if count > 0 {
+            r#"<span class="badge ok">&#10003; respaldado</span>"#
+        } else if last_success != "—" {
+            r#"<span class="badge warn">&#9651; sin cambios</span>"#
+        } else {
+            r#"<span class="badge err">&#10007; sin respaldos</span>"#
+        };
+        let _ = write!(
+            summary,
+            r#"<tr>
+  <td>{name}</td>
+  <td>{badge}</td>
+  <td class="num">{count}</td>
+  <td>{first}</td>
+  <td>{last}</td>
+  <td>{last_success}</td>
+  <td class="num">{total}</td>
+</tr>"#,
+            name = html_escape(name),
+            badge = badge,
+            count = count,
+            first = html_escape(&first),
+            last = html_escape(&last),
+            last_success = html_escape(&last_success),
+            total = human_size(total),
+        );
+    }
+
+    let mut detail = String::new();
+    for e in &entries {
+        let _ = write!(
+            detail,
+            r#"<tr>
+  <td>{date}</td>
+  <td>{time}</td>
+  <td>{dev}</td>
+  <td class="num">{size}</td>
+  <td class="mono">{hash}</td>
+</tr>"#,
+            date = e.created_at.format("%Y-%m-%d"),
+            time = e.created_at.format("%H:%M:%S"),
+            dev = html_escape(&e.device),
+            size = human_size(e.size_bytes),
+            hash = html_escape(&e.sha256.chars().take(16).collect::<String>()),
+        );
+    }
+    if detail.is_empty() {
+        detail.push_str(
+            r#"<tr><td colspan="5" class="empty">Sin respaldos almacenados en este mes.</td></tr>"#,
+        );
+    }
+
+    // Automatic conclusions, one bullet per device — mirrors the RNPN
+    // availability-report format and gives management a plain-language readout.
+    let mut conclusions = String::new();
+    for name in &dev_names {
+        let dev_last = entries
+            .iter()
+            .rfind(|e| &e.device == name)
+            .map(|e| e.created_at.format("%d/%m/%Y %H:%M").to_string());
+        let count = entries.iter().filter(|e| &e.device == name).count();
+        let last_success = storage::last_success_at(&cfg.global.backup_dir, name)
+            .map(|t| t.format("%d/%m/%Y %H:%M").to_string());
+        let msg = match (count, dev_last, last_success) {
+            (n, Some(last), _) if n > 0 => format!(
+                "<b>{}</b>: {} copia(s) de configuración almacenada(s) en el mes; última {} UTC. Respaldos al día.",
+                html_escape(name), n, last
+            ),
+            (_, _, Some(ls)) => format!(
+                "<b>{}</b>: sin cambios de configuración este mes (no genera archivo nuevo bajo deduplicación); último respaldo exitoso {} UTC.",
+                html_escape(name), ls
+            ),
+            _ => format!(
+                "<b>{}</b>: sin respaldos registrados en el período — requiere verificación.",
+                html_escape(name)
+            ),
+        };
+        let _ = write!(conclusions, "<li>{msg}</li>");
+    }
+
+    let total_size: u64 = entries.iter().map(|e| e.size_bytes).sum();
+    let (py, pm) = if month == 1 {
+        (year - 1, 12)
+    } else {
+        (year, month - 1)
+    };
+    let (ny, nm) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    let month_value = format!("{year:04}-{month:02}");
+    // Period as a dd/mm/yyyy range; `end` is exclusive so the last day is
+    // end − 1 day.
+    let last_day = end - chrono::Duration::days(1);
+    let periodo = format!(
+        "{} – {}",
+        start.format("%d/%m/%Y"),
+        last_day.format("%d/%m/%Y")
+    );
+
+    let body = format!(
+        r#"<div class="toolbar noprint">
+  <a href="/report?month={py:04}-{pm:02}">&larr; mes anterior</a>
+  <form method="get" action="/report">
+    <input type="month" name="month" value="{month_value}">
+    <button type="submit">Ver</button>
+  </form>
+  <a href="/report?month={ny:04}-{nm:02}">mes siguiente &rarr;</a>
+  <a href="/report.csv?month={month_value}"><button type="button">Descargar CSV</button></a>
+  <button type="button" onclick="window.print()">Imprimir / Guardar PDF</button>
+</div>
+<div class="report">
+  <div class="band">
+    <div class="brand">
+      <div class="org">{org}</div>
+      <div class="inst">{subtitle}</div>
+      <div class="title">Informe de Respaldos de Configuración — {mes} {year}</div>
+    </div>
+    <div class="period">
+      <div class="lbl">Período</div>
+      <div class="val">{periodo}</div>
+    </div>
+  </div>
+  <div class="content">
+    <p class="meta">Total de copias almacenadas en el mes: <b>{count}</b> · Tamaño total: <b>{total_size}</b> · Equipos: <b>{ndev}</b></p>
+    <h2>Resumen por equipo</h2>
+    <table>
+    <thead><tr>
+      <th>Equipo</th><th>Estado</th><th class="num">Respaldos</th>
+      <th>Primer respaldo</th><th>Último respaldo</th><th>Último éxito</th><th class="num">Tamaño</th>
+    </tr></thead>
+    <tbody>{summary}</tbody>
+    </table>
+    <h2>Detalle de respaldos almacenados</h2>
+    <table>
+    <thead><tr>
+      <th>Fecha (UTC)</th><th>Hora (UTC)</th><th>Equipo</th><th class="num">Tamaño</th><th>SHA-256 (integridad)</th>
+    </tr></thead>
+    <tbody>{detail}</tbody>
+    </table>
+    <p class="note">Cada fila corresponde a una copia de configuración almacenada; el hash SHA-256 es la evidencia de integridad del archivo respaldado. Bajo deduplicación, un día sin cambios de configuración no genera un archivo nuevo, pero sí queda registrado como último éxito.</p>
+    <h2>Conclusiones</h2>
+    <ul class="concl">{conclusions}</ul>
+    <div class="sign">
+      <div class="slot"><div class="line">Elaborado por</div>{subtitle}</div>
+      <div class="slot"><div class="line">Revisado por</div>Director de TICs</div>
+    </div>
+  </div>
+  <div class="foot">Generado el {generated} · fortibackup v{ver} · {org}</div>
+</div>"#,
+        org = html_escape(&cfg.report.org_name),
+        subtitle = html_escape(&cfg.report.subtitle),
+        mes = month_name_es(month),
+        year = year,
+        py = py,
+        pm = pm,
+        ny = ny,
+        nm = nm,
+        month_value = month_value,
+        periodo = html_escape(&periodo),
+        count = entries.len(),
+        ndev = dev_names.len(),
+        total_size = human_size(total_size),
+        generated = Utc::now().format("%d/%m/%Y %H:%M UTC"),
+        ver = env!("CARGO_PKG_VERSION"),
+        summary = summary,
+        detail = detail,
+        conclusions = conclusions,
+    );
+    html_response(page("Informe mensual", &body))
+}
+
+async fn serve_report_csv(state: &AppState, query: Option<&str>) -> Response<Full<Bytes>> {
+    let cfg = state.cfg().await;
+    let (year, month) = parse_month(query);
+    let (start, end) = month_bounds(year, month);
+    let entries = entries_in_month(&cfg, start, end);
+
+    let mut csv = String::from("fecha_utc,hora_utc,equipo,tamano_bytes,sha256,archivo\n");
+    for e in &entries {
+        let file = e.path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        let _ = writeln!(
+            csv,
+            "{},{},{},{},{},{}",
+            e.created_at.format("%Y-%m-%d"),
+            e.created_at.format("%H:%M:%S"),
+            csv_field(&e.device),
+            e.size_bytes,
+            e.sha256,
+            csv_field(file),
+        );
+    }
+
+    let filename = format!("informe-respaldos-{year:04}-{month:02}.csv");
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/csv; charset=utf-8")
+        .header(
+            CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{filename}\""),
+        )
+        .body(Full::new(Bytes::from(csv)))
+        .expect("csv report")
+}
+
+/// Quote a CSV field per RFC 4180 when it contains a delimiter, quote, or
+/// newline; otherwise return it unchanged.
+fn csv_field(s: &str) -> String {
+    if s.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_owned()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1081,6 +1531,81 @@ mod tests {
             parsed.get("toml").map(String::as_str),
             Some(r#"backup_dir = "/x""#)
         );
+    }
+
+    #[test]
+    fn host_of_extracts_authority() {
+        assert_eq!(host_of("http://127.0.0.1:8888/").as_deref(), Some("127.0.0.1:8888"));
+        assert_eq!(
+            host_of("https://fb.example:8443/device/x?a=1").as_deref(),
+            Some("fb.example:8443")
+        );
+        assert_eq!(host_of("http://user@host:80/p").as_deref(), Some("host:80"));
+        assert_eq!(host_of(""), None);
+    }
+
+    fn hdrs(pairs: &[(hyper::header::HeaderName, &str)]) -> hyper::HeaderMap {
+        let mut h = hyper::HeaderMap::new();
+        for (name, value) in pairs {
+            h.insert(name.clone(), value.parse().unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn same_origin_accepts_matching_origin() {
+        let h = hdrs(&[(HOST, "127.0.0.1:8888"), (ORIGIN, "http://127.0.0.1:8888")]);
+        assert!(same_origin(&h));
+    }
+
+    #[test]
+    fn same_origin_rejects_foreign_origin() {
+        let h = hdrs(&[(HOST, "127.0.0.1:8888"), (ORIGIN, "http://evil.example")]);
+        assert!(!same_origin(&h));
+    }
+
+    #[test]
+    fn same_origin_falls_back_to_referer_and_allows_headerless() {
+        let ok = hdrs(&[
+            (HOST, "127.0.0.1:8888"),
+            (REFERER, "http://127.0.0.1:8888/device/x"),
+        ]);
+        assert!(same_origin(&ok));
+        // curl-style: no Origin, no Referer → allowed (not a CSRF vector).
+        let bare = hdrs(&[(HOST, "127.0.0.1:8888")]);
+        assert!(same_origin(&bare));
+        // No Host header at all → rejected.
+        let no_host = hdrs(&[(ORIGIN, "http://127.0.0.1:8888")]);
+        assert!(!same_origin(&no_host));
+    }
+
+    #[test]
+    fn parse_month_reads_valid_param() {
+        assert_eq!(parse_month(Some("month=2026-06")), (2026, 6));
+        assert_eq!(parse_month(Some("foo=bar&month=2025-12")), (2025, 12));
+    }
+
+    #[test]
+    fn parse_month_rejects_out_of_range_and_garbage() {
+        // Month 13 and non-numeric fall back to the current UTC month.
+        let now = Utc::now();
+        assert_eq!(parse_month(Some("month=2026-13")), (now.year(), now.month()));
+        assert_eq!(parse_month(Some("month=nope")), (now.year(), now.month()));
+        assert_eq!(parse_month(None), (now.year(), now.month()));
+    }
+
+    #[test]
+    fn month_bounds_wraps_december() {
+        let (start, end) = month_bounds(2026, 12);
+        assert_eq!(start.format("%Y-%m-%d").to_string(), "2026-12-01");
+        assert_eq!(end.format("%Y-%m-%d").to_string(), "2027-01-01");
+    }
+
+    #[test]
+    fn csv_field_quotes_only_when_needed() {
+        assert_eq!(csv_field("fgt-prod"), "fgt-prod");
+        assert_eq!(csv_field("a,b"), "\"a,b\"");
+        assert_eq!(csv_field("say \"hi\""), "\"say \"\"hi\"\"\"");
     }
 
     #[test]

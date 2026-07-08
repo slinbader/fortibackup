@@ -1,3 +1,21 @@
+fortibackup (0.7.0-1) unstable; urgency=medium
+
+  * feat(webui): monthly backup report at GET /report, meant as evidence for
+    management. Renders an institutional (RNPN-styled) printable document —
+    header band, per-device summary, detail table with SHA-256 integrity
+    hashes, automatic conclusions and a signature block — plus a "Print /
+    Save PDF" action. A new [report] config block (org_name, subtitle) sets
+    the letterhead. GET /report.csv exports the same month as CSV.
+  * fix(webui): CSRF protection. State-changing POSTs (/run, /config) now
+    require the Origin/Referer host to match the Host header, blocking a
+    cross-site page from riding on the browser's cached Basic-Auth
+    credentials. Header-less clients (curl, scripts) are unaffected.
+  * fix(webui): the "Run now" in-flight reservation is now released via an
+    RAII guard, so a panic mid-backup can no longer leave a device stuck
+    marked "running" until the process restarts.
+
+ -- Luis Herrera <luis.herrera@rnpn.gob.sv>  Wed, 08 Jul 2026 15:10:00 -0600
+
 fortibackup (0.6.0-1) unstable; urgency=medium
 
   * feat(watchdog): backup-overdue detection. A new optional [watchdog]

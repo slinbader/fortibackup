@@ -27,6 +27,14 @@ listen = "127.0.0.1:9090"
 # user = "admin"
 # password_env = "FORTIBACKUP_WEBUI_PASS"
 
+# Institutional header for the web UI's monthly backup report (/report), which
+# is meant to be printed to PDF or exported to CSV as evidence for management.
+# Both fields are optional and default to "RNPN" / "Unidad de Redes y
+# Ciberseguridad".
+# [report]
+# org_name = "RNPN"
+# subtitle = "Unidad de Redes y Ciberseguridad"
+
 # Optional S3 / S3-compatible (MinIO, Wasabi, B2) mirror. Filesystem is
 # always the primary, authoritative store; this just uploads a copy of each
 # new backup. Leave out the block entirely to disable.
