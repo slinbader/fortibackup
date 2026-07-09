@@ -248,6 +248,20 @@ pub enum TransportMethod {
     Ssh,
 }
 
+/// Firewall vendor / configuration dialect. Determines the SSH command used to
+/// dump the running config and how the resulting payload is validated and
+/// parsed for metadata. Defaults to `fortigate` so existing configs are
+/// unaffected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Vendor {
+    #[default]
+    Fortigate,
+    /// Hillstone StoneOS. Backed up over SSH via `show configuration`; StoneOS
+    /// has no REST config-backup endpoint, so `method = "ssh"` is required.
+    Hillstone,
+}
+
 /// A single FortiGate device to back up.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Device {
@@ -255,6 +269,10 @@ pub struct Device {
     pub host: String,
     pub port: u16,
     pub method: TransportMethod,
+    /// Firewall vendor. Defaults to `fortigate`; set to `hillstone` for
+    /// StoneOS devices (which must use `method = "ssh"`).
+    #[serde(default)]
+    pub vendor: Vendor,
 
     // API
     pub api_token_env: Option<String>,
@@ -363,6 +381,13 @@ fn validate(cfg: &Config) -> Result<(), ConfigError> {
 }
 
 fn validate_device(device: &Device) -> Result<(), ConfigError> {
+    if device.vendor == Vendor::Hillstone && device.method == TransportMethod::Api {
+        return Err(ConfigError::Invalid(format!(
+            "device `{}`: vendor=hillstone requires method=ssh (StoneOS has no REST \
+             config-backup endpoint)",
+            device.name
+        )));
+    }
     match device.method {
         TransportMethod::Api => {
             if device.api_token_env.is_none() {
@@ -487,6 +512,52 @@ host = "1.1.1.1"
 port = 22
 method = "ssh"
 ssh_username = "u"
+schedule = "0 0 2 * * *"
+"#;
+        let err = parse_str(raw).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid(_)));
+    }
+
+    #[test]
+    fn defaults_vendor_to_fortigate() {
+        let cfg = parse_str(MINIMAL_API).expect("parse");
+        assert_eq!(cfg.devices[0].vendor, Vendor::Fortigate);
+    }
+
+    #[test]
+    fn parses_hillstone_ssh_device() {
+        let raw = r#"
+[global]
+backup_dir = "/var/lib/fortibackup"
+
+[[devices]]
+name = "hs-edge"
+host = "10.0.0.5"
+port = 22
+method = "ssh"
+vendor = "hillstone"
+ssh_username = "backup"
+ssh_password_env = "HS_PASS"
+schedule = "0 0 2 * * *"
+"#;
+        let cfg = parse_str(raw).expect("parse");
+        assert_eq!(cfg.devices[0].vendor, Vendor::Hillstone);
+        assert_eq!(cfg.devices[0].method, TransportMethod::Ssh);
+    }
+
+    #[test]
+    fn rejects_hillstone_with_api_method() {
+        let raw = r#"
+[global]
+backup_dir = "/var/lib/fortibackup"
+
+[[devices]]
+name = "hs-bad"
+host = "10.0.0.5"
+port = 443
+method = "api"
+vendor = "hillstone"
+api_token_env = "T"
 schedule = "0 0 2 * * *"
 "#;
         let err = parse_str(raw).unwrap_err();

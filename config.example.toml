@@ -101,3 +101,18 @@ ssh_key_path = "/etc/fortibackup/keys/id_ed25519"
 # ssh_password_env = "FGT_SSH_PASSWORD_SECONDARY"
 schedule = "0 0 3 * * *"   # 03:00 every day
 timeout_secs = 120
+
+# Hillstone StoneOS firewall. Backed up over SSH with `show configuration`
+# (StoneOS has no REST config-backup endpoint, so method must be "ssh").
+# The `vendor` field defaults to "fortigate" when omitted.
+[[devices]]
+name = "hillstone-edge"
+host = "10.0.0.5"
+port = 22
+method = "ssh"
+vendor = "hillstone"
+ssh_username = "backup_user"
+ssh_password_env = "HS_SSH_PASSWORD"
+# alternatively: ssh_key_path = "/etc/fortibackup/keys/id_ed25519"
+schedule = "0 0 4 * * *"   # 04:00 every day
+timeout_secs = 120

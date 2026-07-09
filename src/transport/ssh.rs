@@ -10,10 +10,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use russh::client::{self, Handle, Handler};
-use russh::{ChannelMsg, Disconnect};
+use russh::client::{self, Handle, Handler, Msg};
+use russh::{Channel, ChannelMsg, Disconnect};
 
-use crate::config::{Device, TransportMethod};
+use crate::config::{Device, TransportMethod, Vendor};
 use crate::error::TransportError;
 use crate::transport::{retry_with_backoff, BackupArtifact, BackupTransport};
 
@@ -61,32 +61,55 @@ impl BackupTransport for SshTransport {
 
         let timeout = Duration::from_secs(device.timeout_secs);
         let device_clone = device.clone();
+        let command = ssh_command(device.vendor);
 
         let raw = retry_with_backoff(|| {
             let username = username.clone();
             let device = device_clone.clone();
             async move {
-                tokio::time::timeout(
-                    timeout,
-                    run_ssh_session(&device, &username, "show full-configuration"),
-                )
-                .await
-                .map_err(|_| TransportError::Timeout {
-                    secs: device.timeout_secs,
-                })?
+                tokio::time::timeout(timeout, run_ssh_session(&device, &username, command))
+                    .await
+                    .map_err(|_| TransportError::Timeout {
+                        secs: device.timeout_secs,
+                    })?
             }
         })
         .await?;
 
-        let (hostname, firmware, serial) = parse_metadata(&raw, &device.name);
-
-        Ok(BackupArtifact {
-            content: raw.into_bytes(),
-            hostname,
-            firmware_version: firmware,
-            serial,
-            fetched_at: Utc::now(),
+        Ok(match device.vendor {
+            Vendor::Fortigate => {
+                let (hostname, firmware, serial) = parse_metadata(&raw, &device.name);
+                BackupArtifact {
+                    content: raw.into_bytes(),
+                    hostname,
+                    firmware_version: firmware,
+                    serial,
+                    fetched_at: Utc::now(),
+                }
+            }
+            Vendor::Hillstone => {
+                let cleaned = clean_hillstone(&raw);
+                validate_hillstone(&cleaned)?;
+                let (hostname, firmware) = parse_hillstone_metadata(&cleaned, &device.name);
+                BackupArtifact {
+                    content: cleaned.into_bytes(),
+                    hostname,
+                    firmware_version: firmware,
+                    // StoneOS does not print the serial in `show configuration`;
+                    // it lives in `show version`, which we don't fetch.
+                    serial: None,
+                    fetched_at: Utc::now(),
+                }
+            }
         })
+    }
+}
+
+/// The CLI command that dumps the full running configuration for the vendor.
+const fn ssh_command(vendor: Vendor) -> &'static str {
+    match vendor {
+        Vendor::Fortigate => "show full-configuration",
+        Vendor::Hillstone => "show configuration",
     }
 }
 
@@ -112,15 +135,70 @@ async fn run_ssh_session(
         .channel_open_session()
         .await
         .map_err(|e| TransportError::Ssh(format!("channel: {e}")))?;
-    channel
-        .request_pty(false, "xterm", 200, 50, 0, 0, &[])
-        .await
-        .map_err(|e| TransportError::Ssh(format!("pty: {e}")))?;
-    channel
-        .exec(true, command)
-        .await
-        .map_err(|e| TransportError::Ssh(format!("exec: {e}")))?;
 
+    let overall = Duration::from_secs(device.timeout_secs);
+    let buf = match device.vendor {
+        // FortiGate answers a one-shot `exec` and streams the whole config to EOF.
+        Vendor::Fortigate => {
+            channel
+                .request_pty(false, "xterm", 200, 50, 0, 0, &[])
+                .await
+                .map_err(|e| TransportError::Ssh(format!("pty: {e}")))?;
+            channel
+                .exec(true, command)
+                .await
+                .map_err(|e| TransportError::Ssh(format!("exec: {e}")))?;
+            read_to_eof(&mut channel).await
+        }
+        // StoneOS rejects `exec` ("Max try count must be a positive integer") and
+        // only serves an interactive CLI. We open a shell, disable the `--More--`
+        // pager, type the command, and read until the config's `End` marker. The
+        // wide PTY also keeps StoneOS from hard-wrapping long lines.
+        Vendor::Hillstone => {
+            channel
+                .request_pty(false, "vt100", 512, 10_000, 0, 0, &[])
+                .await
+                .map_err(|e| TransportError::Ssh(format!("pty: {e}")))?;
+            channel
+                .request_shell(true)
+                .await
+                .map_err(|e| TransportError::Ssh(format!("shell: {e}")))?;
+            // Consume the login banner up to the first idle (the prompt).
+            let _ = read_until(&mut channel, Duration::from_millis(1500), overall, false).await;
+            // Turn off pagination for this session so the whole config streams in
+            // one shot instead of stopping every screen at a `--More--` prompt.
+            // StoneOS: `terminal length 0` (session-only, not persisted).
+            channel
+                .data(&b"terminal length 0\n"[..])
+                .await
+                .map_err(|e| TransportError::Ssh(format!("write pager-off: {e}")))?;
+            let _ = read_until(&mut channel, Duration::from_secs(1), overall, false).await;
+            let line = format!("{command}\n");
+            channel
+                .data(line.as_bytes())
+                .await
+                .map_err(|e| TransportError::Ssh(format!("write command: {e}")))?;
+            let out = read_until(&mut channel, Duration::from_millis(2500), overall, true).await;
+            let _ = channel.data(&b"exit\n"[..]).await;
+            out
+        }
+    };
+
+    let _ = session
+        .disconnect(Disconnect::ByApplication, "bye", "en")
+        .await;
+
+    // StoneOS output carries CR and occasional non-UTF-8 terminal bytes, so
+    // decode lossily rather than fail the whole backup on a stray byte.
+    match device.vendor {
+        Vendor::Fortigate => String::from_utf8(buf)
+            .map_err(|e| TransportError::InvalidResponse(format!("utf8: {e}"))),
+        Vendor::Hillstone => Ok(String::from_utf8_lossy(&buf).into_owned()),
+    }
+}
+
+/// Read a channel until EOF/close (one-shot `exec` transports).
+async fn read_to_eof(channel: &mut Channel<Msg>) -> Vec<u8> {
     let mut buf: Vec<u8> = Vec::with_capacity(1024 * 1024);
     while let Some(msg) = channel.wait().await {
         match msg {
@@ -131,12 +209,56 @@ async fn run_ssh_session(
             _ => {}
         }
     }
+    buf
+}
 
-    let _ = session
-        .disconnect(Disconnect::ByApplication, "bye", "en")
-        .await;
+/// Read from an interactive shell channel, accumulating output until one of:
+/// the channel closes, `stop_on_end` is set and a StoneOS `End` line arrives,
+/// an `idle` gap passes with data already buffered, or the `overall` deadline
+/// elapses. This drives StoneOS's interactive CLI without an EOF to rely on.
+async fn read_until(
+    channel: &mut Channel<Msg>,
+    idle: Duration,
+    overall: Duration,
+    stop_on_end: bool,
+) -> Vec<u8> {
+    let mut buf: Vec<u8> = Vec::with_capacity(1024 * 1024);
+    let deadline = tokio::time::Instant::now() + overall;
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let wait = idle.min(deadline - now);
+        match tokio::time::timeout(wait, channel.wait()).await {
+            Ok(Some(ChannelMsg::Data { ref data } | ChannelMsg::ExtendedData { ref data, .. })) => {
+                buf.extend_from_slice(data);
+                if stop_on_end && ends_with_config_marker(&buf) {
+                    break;
+                }
+            }
+            Ok(
+                Some(ChannelMsg::Eof | ChannelMsg::Close | ChannelMsg::ExitStatus { .. }) | None,
+            ) => break,
+            Ok(Some(_)) => {}
+            // Idle gap: if we have already received output, treat streaming as
+            // finished; otherwise keep waiting until the overall deadline.
+            Err(_) => {
+                if !buf.is_empty() {
+                    break;
+                }
+            }
+        }
+    }
+    buf
+}
 
-    String::from_utf8(buf).map_err(|e| TransportError::InvalidResponse(format!("utf8: {e}")))
+/// True once the buffered output contains a StoneOS `End` terminator line — the
+/// last line `show configuration` prints before returning to the prompt.
+fn ends_with_config_marker(buf: &[u8]) -> bool {
+    String::from_utf8_lossy(buf)
+        .lines()
+        .any(|l| l.trim_end() == "End")
 }
 
 async fn authenticate(
@@ -234,6 +356,102 @@ fn parse_metadata(raw: &str, fallback_name: &str) -> (String, Option<String>, Op
     )
 }
 
+/// Strip the interactive session artifacts from a StoneOS `show configuration`
+/// dump, keeping just the configuration body.
+///
+/// The raw stream looks like:
+/// ```text
+/// Building configuration.
+/// Running configuration:
+/// # global configuration version: 8527
+/// ...config...
+/// End
+/// FW_RNPN_Carbonel(M0B1)#     <- trailing CLI prompt
+/// ```
+/// We drop the leading banner and the trailing prompt, and keep everything
+/// from the first real line through the terminating `End` marker. Any stray
+/// `--More--` pager line (should paging leak into the exec stream) is dropped.
+/// Trailing whitespace — which a PTY pads onto lines — is trimmed so cosmetic
+/// terminal padding never shows up as a spurious diff.
+fn clean_hillstone(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut started = false;
+    for line in raw.lines() {
+        let t = line.trim_end();
+        if t.contains("--More--") {
+            continue;
+        }
+        if !started {
+            // Anchor on the config header, dropping everything before it: the
+            // SSH login banner, the echoed command, and the `Building
+            // configuration.` line. `Running configuration:` marks the start but
+            // is itself not config; a leading `#` comment is the fallback anchor.
+            if t == "Running configuration:" {
+                started = true;
+                continue;
+            }
+            if t.starts_with('#') {
+                started = true;
+            } else {
+                continue;
+            }
+        }
+        out.push_str(t);
+        out.push('\n');
+        if t == "End" {
+            // The config proper ends here; anything after is the CLI prompt.
+            break;
+        }
+    }
+    out
+}
+
+/// Reject payloads that don't look like a StoneOS configuration — catches the
+/// case where the SSH exec returns an error, a login banner, or an empty body
+/// that would otherwise be persisted as a fake "backup".
+fn validate_hillstone(cleaned: &str) -> Result<(), TransportError> {
+    if cleaned.trim().is_empty() {
+        return Err(TransportError::InvalidResponse(
+            "empty StoneOS configuration body".to_owned(),
+        ));
+    }
+    // A real dump carries the version header and/or a hostname line.
+    if cleaned.contains("configuration version")
+        || cleaned.contains("hostname \"")
+        || cleaned.contains("\nVersion ")
+    {
+        return Ok(());
+    }
+    Err(TransportError::InvalidResponse(
+        "payload does not look like a StoneOS configuration".to_owned(),
+    ))
+}
+
+/// Best-effort extraction of hostname / firmware from a StoneOS configuration.
+/// Returns the device name as the hostname fallback.
+fn parse_hillstone_metadata(cleaned: &str, fallback_name: &str) -> (String, Option<String>) {
+    let mut hostname: Option<String> = None;
+    let mut firmware: Option<String> = None;
+    for line in cleaned.lines() {
+        let trimmed = line.trim();
+        if hostname.is_none() {
+            if let Some(rest) = trimmed.strip_prefix("hostname ") {
+                hostname = Some(rest.trim().trim_matches('"').to_owned());
+            }
+        }
+        if firmware.is_none() {
+            // e.g. `Version 5.5R10`
+            if let Some(rest) = trimmed.strip_prefix("Version ") {
+                firmware = Some(rest.trim().to_owned());
+            }
+        }
+    }
+    (
+        hostname.unwrap_or_else(|| fallback_name.to_owned()),
+        firmware,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,5 +472,93 @@ mod tests {
         assert_eq!(host, "fallback");
         assert!(fw.is_none());
         assert!(serial.is_none());
+    }
+
+    #[test]
+    fn ssh_command_per_vendor() {
+        assert_eq!(ssh_command(Vendor::Fortigate), "show full-configuration");
+        assert_eq!(ssh_command(Vendor::Hillstone), "show configuration");
+    }
+
+    // A trimmed, secret-free StoneOS dump mirroring the real framing:
+    // banner + version header + body ending in `End`, then the CLI prompt.
+    const HILLSTONE_RAW: &str = "\
+Building configuration.
+Running configuration:
+# global configuration version: 8527
+# configuration sequence number: 6261
+!
+Version 5.5R10
+hostname \"FW_Edge\"
+interface ethernet0/0
+exit
+End
+FW_Edge(M0B1)# ";
+
+    #[test]
+    fn clean_hillstone_strips_banner_and_prompt() {
+        let cleaned = clean_hillstone(HILLSTONE_RAW);
+        // Banner gone, prompt gone, body kept, terminated by `End`.
+        assert!(!cleaned.contains("Building configuration."));
+        assert!(!cleaned.contains("Running configuration:"));
+        assert!(!cleaned.contains("FW_Edge(M0B1)#"));
+        assert!(cleaned.starts_with("# global configuration version: 8527\n"));
+        assert!(cleaned.ends_with("End\n"));
+        // Trailing PTY padding on `hostname`/`exit` lines is trimmed.
+        assert!(cleaned.contains("\nhostname \"FW_Edge\"\n"));
+        assert!(cleaned.contains("\nexit\n"));
+    }
+
+    #[test]
+    fn clean_hillstone_strips_interactive_login_and_command_echo() {
+        // What the interactive shell channel actually returns: a login banner,
+        // the echoed `show configuration` command, then the config, then the
+        // prompt. Everything but the config body must be dropped.
+        let raw = "\
+Hillstone StoneOS
+FW_Edge(M0B1)# show configuration
+Building configuration.
+Running configuration:
+# global configuration version: 100
+hostname \"FW_Edge\"
+End
+FW_Edge(M0B1)# ";
+        let cleaned = clean_hillstone(raw);
+        assert!(cleaned.starts_with("# global configuration version: 100\n"));
+        assert!(!cleaned.contains("show configuration"));
+        assert!(!cleaned.contains("Hillstone StoneOS"));
+        assert!(!cleaned.contains("FW_Edge(M0B1)#"));
+        assert!(cleaned.ends_with("End\n"));
+    }
+
+    #[test]
+    fn ends_with_config_marker_detects_end_line() {
+        assert!(ends_with_config_marker(b"foo\nEnd\r\nprompt# "));
+        assert!(ends_with_config_marker(b"foo\nEnd\n"));
+        assert!(!ends_with_config_marker(b"foo\nEndpoint\n"));
+        assert!(!ends_with_config_marker(b"still streaming..."));
+    }
+
+    #[test]
+    fn clean_hillstone_drops_pager_lines() {
+        let raw = "Running configuration:\nhostname \"x\"\n--More-- \ninterface e0\nEnd\n";
+        let cleaned = clean_hillstone(raw);
+        assert!(!cleaned.contains("--More--"));
+        assert!(cleaned.contains("interface e0"));
+    }
+
+    #[test]
+    fn parse_hillstone_metadata_extracts_hostname_and_version() {
+        let cleaned = clean_hillstone(HILLSTONE_RAW);
+        let (host, fw) = parse_hillstone_metadata(&cleaned, "fallback");
+        assert_eq!(host, "FW_Edge");
+        assert_eq!(fw.as_deref(), Some("5.5R10"));
+    }
+
+    #[test]
+    fn validate_hillstone_accepts_real_dump_rejects_garbage() {
+        assert!(validate_hillstone(&clean_hillstone(HILLSTONE_RAW)).is_ok());
+        assert!(validate_hillstone("").is_err());
+        assert!(validate_hillstone("command not found\n").is_err());
     }
 }

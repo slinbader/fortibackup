@@ -291,7 +291,7 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::TransportMethod;
+    use crate::config::{TransportMethod, Vendor};
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -301,6 +301,7 @@ mod tests {
             host: "127.0.0.1".to_owned(),
             port: base_port,
             method: TransportMethod::Api,
+            vendor: Vendor::Fortigate,
             api_token_env: Some("FGT_TEST_TOKEN".to_owned()),
             verify_tls: false,
             ssh_username: None,

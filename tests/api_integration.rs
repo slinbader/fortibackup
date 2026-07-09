@@ -6,7 +6,7 @@
 //! expected metadata, and authentication failures bubble up as
 //! `TransportError::Auth`.
 
-use fortibackup::config::{Device, TransportMethod};
+use fortibackup::config::{Device, TransportMethod, Vendor};
 use fortibackup::transport::api::ApiTransport;
 use fortibackup::transport::BackupTransport;
 
@@ -19,6 +19,7 @@ fn make_device(token_env: &str) -> Device {
         host: "127.0.0.1".into(),
         port: 443,
         method: TransportMethod::Api,
+        vendor: Vendor::Fortigate,
         api_token_env: Some(token_env.into()),
         verify_tls: false,
         ssh_username: None,
