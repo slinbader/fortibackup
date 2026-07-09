@@ -28,7 +28,7 @@ fills the gap with a small, auditable, dependency-light service:
 ## Requirements
 
 - Linux (tested on Debian 12+)
-- Rust **1.80** or newer
+- Rust **1.85** or newer
 - Outbound network access from the host to each FortiGate (HTTPS or SSH)
 
 ## Install

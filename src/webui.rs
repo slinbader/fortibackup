@@ -1044,10 +1044,9 @@ async fn handle_run(
 
     // Reserve the device. If it's already in flight, return 409.
     {
-        let mut flight = state
-            .in_flight
-            .lock()
-            .map_err(|_| error_page(StatusCode::INTERNAL_SERVER_ERROR, "in-flight lock poisoned"))?;
+        let mut flight = state.in_flight.lock().map_err(|_| {
+            error_page(StatusCode::INTERNAL_SERVER_ERROR, "in-flight lock poisoned")
+        })?;
         if !flight.insert(name.to_owned()) {
             return Err(error_page(
                 StatusCode::CONFLICT,
@@ -1172,12 +1171,11 @@ fn entries_in_month(
     start: DateTime<Utc>,
     end: DateTime<Utc>,
 ) -> Vec<storage::BackupEntry> {
-    let mut entries: Vec<storage::BackupEntry> =
-        storage::list_all_entries(&cfg.global.backup_dir)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|e| e.created_at >= start && e.created_at < end)
-            .collect();
+    let mut entries: Vec<storage::BackupEntry> = storage::list_all_entries(&cfg.global.backup_dir)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| e.created_at >= start && e.created_at < end)
+        .collect();
     entries.sort_by(|a, b| {
         a.created_at
             .cmp(&b.created_at)
@@ -1208,12 +1206,14 @@ async fn render_report(state: &AppState, query: Option<&str>) -> Response<Full<B
             entries.iter().filter(|e| &e.device == name).collect();
         let count = dev_entries.len();
         let total: u64 = dev_entries.iter().map(|e| e.size_bytes).sum();
-        let first = dev_entries
-            .first()
-            .map_or_else(|| "—".to_owned(), |e| e.created_at.format("%Y-%m-%d %H:%M").to_string());
-        let last = dev_entries
-            .last()
-            .map_or_else(|| "—".to_owned(), |e| e.created_at.format("%Y-%m-%d %H:%M").to_string());
+        let first = dev_entries.first().map_or_else(
+            || "—".to_owned(),
+            |e| e.created_at.format("%Y-%m-%d %H:%M").to_string(),
+        );
+        let last = dev_entries.last().map_or_else(
+            || "—".to_owned(),
+            |e| e.created_at.format("%Y-%m-%d %H:%M").to_string(),
+        );
         let last_success = storage::last_success_at(&cfg.global.backup_dir, name).map_or_else(
             || "—".to_owned(),
             |t| t.format("%Y-%m-%d %H:%M").to_string(),
@@ -1535,7 +1535,10 @@ mod tests {
 
     #[test]
     fn host_of_extracts_authority() {
-        assert_eq!(host_of("http://127.0.0.1:8888/").as_deref(), Some("127.0.0.1:8888"));
+        assert_eq!(
+            host_of("http://127.0.0.1:8888/").as_deref(),
+            Some("127.0.0.1:8888")
+        );
         assert_eq!(
             host_of("https://fb.example:8443/device/x?a=1").as_deref(),
             Some("fb.example:8443")
@@ -1589,7 +1592,10 @@ mod tests {
     fn parse_month_rejects_out_of_range_and_garbage() {
         // Month 13 and non-numeric fall back to the current UTC month.
         let now = Utc::now();
-        assert_eq!(parse_month(Some("month=2026-13")), (now.year(), now.month()));
+        assert_eq!(
+            parse_month(Some("month=2026-13")),
+            (now.year(), now.month())
+        );
         assert_eq!(parse_month(Some("month=nope")), (now.year(), now.month()));
         assert_eq!(parse_month(None), (now.year(), now.month()));
     }

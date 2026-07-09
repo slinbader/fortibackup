@@ -582,8 +582,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let now = Utc::now();
         // ~5 KB of repetitive text, gzip should be much smaller.
-        let body: Vec<u8> = std::iter::repeat(b"config-system global\n")
-            .take(256)
+        let body: Vec<u8> = std::iter::repeat_n(b"config-system global\n", 256)
             .flatten()
             .copied()
             .collect();
