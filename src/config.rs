@@ -626,11 +626,11 @@ schedule = "0 0 2 * * *"
         assert!(cfg.watchdog.enabled);
         assert_eq!(
             cfg.watchdog.stale_after_duration().unwrap(),
-            std::time::Duration::from_secs(26 * 3600)
+            std::time::Duration::from_hours(26)
         );
         assert_eq!(
             cfg.watchdog.check_interval_duration().unwrap(),
-            std::time::Duration::from_secs(30 * 60)
+            std::time::Duration::from_mins(30)
         );
     }
 
