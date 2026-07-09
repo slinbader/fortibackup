@@ -2,7 +2,9 @@
 name = "fortibackup"
 version = "0.8.0"
 edition = "2021"
-rust-version = "1.85"
+# Documented target only; not CI-gated. The aws-sdk-s3 dependency tree tracks
+# recent stable, so pinning a low MSRV isn't maintainable — CI tests `stable`.
+rust-version = "1.91"
 description = "Automated configuration backup tool for FortiGate devices"
 license = "MIT"
 authors = ["Luis Herrera <luis.herrera1974@gmail.com>"]
