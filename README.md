@@ -1,8 +1,9 @@
 # fortibackup
 
 `fortibackup` is a small Rust CLI / daemon that periodically connects to one or
-more FortiGate firewalls, downloads their running configuration, versions it on
-disk with metadata, and alerts you when something goes wrong.
+more **FortiGate** and **Hillstone StoneOS** firewalls, downloads their running
+configuration, versions it on disk with metadata, and alerts you when something
+goes wrong.
 
 It is designed for unattended operation on a Debian/Linux box as a `systemd`
 service.
@@ -16,8 +17,9 @@ infrastructure in an organization. The default vendor tooling for configuration
 backups is GUI-driven, manual, or tied to FortiManager licenses. `fortibackup`
 fills the gap with a small, auditable, dependency-light service:
 
-- pulls the **full** configuration via the documented REST API (preferred) or
-  SSH (`show full-configuration`)
+- pulls the **full** configuration from **FortiGate** (documented REST API,
+  preferred, or SSH `show full-configuration`) and from **Hillstone StoneOS**
+  (interactive SSH `show configuration` — StoneOS has no backup REST API)
 - hashes the result and stores **only changes**, with a JSON sidecar
 - enforces retention (`N` days, but always keep at least `M` copies)
 - notifies via email and/or webhook on failure
@@ -145,6 +147,75 @@ end
 
 Then point `ssh_username` and `ssh_key_path` (or `ssh_password_env`) at this
 user in `config.toml`.
+
+## Adding a Hillstone StoneOS device
+
+`fortibackup` also backs up **Hillstone StoneOS** firewalls. StoneOS exposes no
+REST configuration-backup endpoint, so these are pulled over **SSH** by driving
+the interactive CLI: the tool logs in, disables the pager (`terminal length 0`),
+runs `show configuration`, and reads the config back — stripping the login
+banner, command echo, and trailing prompt automatically. Because StoneOS prints
+stable ciphertext (unlike the FortiGate API, which re-encrypts secrets on every
+fetch), change detection works with no vendor-specific tuning.
+
+Set `vendor = "hillstone"` and `method = "ssh"` on the device — there is no API
+transport for StoneOS, so `vendor = "hillstone"` with `method = "api"` is
+rejected at config load:
+
+```toml
+[[devices]]
+name = "hillstone-edge"
+host = "10.0.0.5"
+port = 22
+method = "ssh"
+vendor = "hillstone"           # default is "fortigate" when omitted
+ssh_username = "backup"
+ssh_password_env = "HS_EDGE_PASS"   # or use ssh_key_path = "/etc/fortibackup/keys/id_ed25519"
+schedule = "0 40 7 * * *"
+timeout_secs = 120
+```
+
+### Creating the SSH backup user on StoneOS
+
+`show configuration` requires an **admin-role** account. In the WebUI under
+*System → Administrators* (or via the CLI), create a dedicated user, give it a
+strong password, and restrict its access method to **SSH only**. Reference it
+from `ssh_username`, and put its password in the environment variable named by
+`ssh_password_env` (or use `ssh_key_path` for key-based auth).
+
+### Deploying to a running systemd service
+
+Adding a device to an already-installed service is **config-only** — no rebuild
+or redeploy of the binary:
+
+```sh
+# 1) add the password to the service environment (kept out of shell history)
+sudo sh -c 'stty -echo; printf "StoneOS backup password: "; read P; stty echo; \
+  printf "\nHS_EDGE_PASS=%s\n" "$P" >> /etc/fortibackup/environment'
+
+# 2) append the [[devices]] block above to the config
+sudoedit /etc/fortibackup/config.toml
+
+# 3) verify it parses and the device authenticates, WITHOUT touching the service
+#    (runs as the service user with its environment; a bad config is caught here
+#    instead of failing the live daemon on restart)
+sudo systemd-run --uid=fortibackup -p EnvironmentFile=/etc/fortibackup/environment \
+  --wait --collect --pty /usr/bin/fortibackup \
+  --config /etc/fortibackup/config.toml verify
+
+# 4) once it reports the device reachable, reload the daemon
+sudo systemctl restart fortibackup
+
+# 5) (optional) seed the first backup now instead of waiting for the schedule
+sudo systemd-run --uid=fortibackup -p EnvironmentFile=/etc/fortibackup/environment \
+  --wait --collect --pty /usr/bin/fortibackup \
+  --config /etc/fortibackup/config.toml once --device hillstone-edge
+```
+
+> **Tip — stagger schedules.** The scheduler runs each device on its own cron
+> with no inter-device dependency. To keep backups sequential (never running in
+> parallel), offset each device by a few minutes — e.g. a FortiGate at
+> `0 30 7 * * *`, then Hillstones at `0 35 7 * * *`, `0 40 7 * * *`, and so on.
 
 ## Install as a systemd service
 
