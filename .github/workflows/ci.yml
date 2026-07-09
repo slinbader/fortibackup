@@ -88,7 +88,8 @@ jobs:
           key: deb
       - name: Install cargo-deb
         run: cargo install cargo-deb --locked
-      - run: cargo deb --locked
+      - name: Build deb (with manpage + completions)
+        run: make deb
       - name: Upload .deb
         uses: actions/upload-artifact@v4
         with:
