@@ -370,16 +370,14 @@ fn serve_manifest() -> Response<Full<Bytes>> {
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "background_color": "{bg}",
-  "theme_color": "{theme}",
+  "background_color": "{PWA_BG_COLOR}",
+  "theme_color": "{PWA_THEME_COLOR}",
   "icons": [
     {{ "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" }},
     {{ "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }},
     {{ "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }}
   ]
-}}"#,
-        bg = PWA_BG_COLOR,
-        theme = PWA_THEME_COLOR
+}}"#
     );
     Response::builder()
         .status(StatusCode::OK)
@@ -392,7 +390,7 @@ fn serve_manifest() -> Response<Full<Bytes>> {
 /// state, falling back to a cached app shell when offline. Precaching is
 /// best-effort (a Basic-Auth 401 must not abort install); the shell is also
 /// populated lazily as pages are visited. Satisfies PWA installability.
-const SW_JS: &str = r#"
+const SW_JS: &str = r"
 const CACHE = 'fortibackup-v1';
 const SHELL = ['/', '/style.css', '/icon-192.png', '/icon-512.png', '/manifest.webmanifest'];
 self.addEventListener('install', (e) => {
@@ -422,7 +420,7 @@ self.addEventListener('fetch', (e) => {
       .catch(() => caches.match(req).then((hit) => hit || caches.match('/')))
   );
 });
-"#;
+";
 
 fn serve_sw() -> Response<Full<Bytes>> {
     Response::builder()

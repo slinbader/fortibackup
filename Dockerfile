@@ -8,6 +8,8 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY tests ./tests
+# PWA icons are include_bytes!'d by src/webui.rs, so they must be in the context
+COPY assets ./assets
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
