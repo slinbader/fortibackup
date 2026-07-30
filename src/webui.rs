@@ -157,6 +157,11 @@ async fn handle(
     {
         (Method::GET, "/") => Ok(render_dashboard(&state).await),
         (Method::GET, "/style.css") => Ok(serve_css()),
+        (Method::GET, "/manifest.webmanifest") => Ok(serve_manifest()),
+        (Method::GET, "/sw.js") => Ok(serve_sw()),
+        (Method::GET, "/icon-192.png") => Ok(serve_icon(ICON_192)),
+        (Method::GET, "/icon-512.png") => Ok(serve_icon(ICON_512)),
+        (Method::GET, "/icon-maskable-512.png") => Ok(serve_icon(ICON_MASKABLE_512)),
         (Method::GET, p) if p.starts_with("/device/") => {
             render_device(&state, decode_segment(&p["/device/".len()..]).as_str()).await
         }
@@ -341,6 +346,103 @@ fn serve_css() -> Response<Full<Bytes>> {
         .expect("css")
 }
 
+// ---------------------------------------------------------------------------
+// PWA assets — installable Web UI (manifest, service worker, icons)
+// ---------------------------------------------------------------------------
+
+/// OS-facing brand color for the installed app (matches the UI header navy).
+const PWA_THEME_COLOR: &str = "#001F5B";
+/// Splash background while the installed app boots (matches the page --bg).
+const PWA_BG_COLOR: &str = "#0f1419";
+
+static ICON_192: &[u8] = include_bytes!("../assets/icon-192.png");
+static ICON_512: &[u8] = include_bytes!("../assets/icon-512.png");
+static ICON_MASKABLE_512: &[u8] = include_bytes!("../assets/icon-maskable-512.png");
+
+/// Web App Manifest: makes the UI installable ("Install app" / "Add to Home
+/// Screen") and gives it a standalone window, icon and theme color.
+fn serve_manifest() -> Response<Full<Bytes>> {
+    let body = format!(
+        r#"{{
+  "name": "fortibackup",
+  "short_name": "fortibackup",
+  "description": "FortiGate configuration backups",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "{bg}",
+  "theme_color": "{theme}",
+  "icons": [
+    {{ "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" }},
+    {{ "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }},
+    {{ "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }}
+  ]
+}}"#,
+        bg = PWA_BG_COLOR,
+        theme = PWA_THEME_COLOR
+    );
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/manifest+json; charset=utf-8")
+        .body(Full::new(Bytes::from(body)))
+        .expect("manifest")
+}
+
+/// Service worker. Network-first so an online browser always sees fresh backup
+/// state, falling back to a cached app shell when offline. Precaching is
+/// best-effort (a Basic-Auth 401 must not abort install); the shell is also
+/// populated lazily as pages are visited. Satisfies PWA installability.
+const SW_JS: &str = r#"
+const CACHE = 'fortibackup-v1';
+const SHELL = ['/', '/style.css', '/icon-192.png', '/icon-512.png', '/manifest.webmanifest'];
+self.addEventListener('install', (e) => {
+  e.waitUntil(
+    caches.open(CACHE).then((c) => c.addAll(SHELL)).catch(() => {}).then(() => self.skipWaiting())
+  );
+});
+self.addEventListener('activate', (e) => {
+  e.waitUntil(
+    caches.keys()
+      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      .then(() => self.clients.claim())
+  );
+});
+self.addEventListener('fetch', (e) => {
+  const req = e.request;
+  if (req.method !== 'GET') return;
+  e.respondWith(
+    fetch(req)
+      .then((res) => {
+        if (res && res.ok && new URL(req.url).origin === self.location.origin) {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(req, copy));
+        }
+        return res;
+      })
+      .catch(() => caches.match(req).then((hit) => hit || caches.match('/')))
+  );
+});
+"#;
+
+fn serve_sw() -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/javascript; charset=utf-8")
+        // Let the worker control the whole origin (defensive; it's served at root).
+        .header("Service-Worker-Allowed", "/")
+        .body(Full::new(Bytes::from_static(SW_JS.as_bytes())))
+        .expect("sw")
+}
+
+fn serve_icon(bytes: &'static [u8]) -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "image/png")
+        .header("cache-control", "public, max-age=86400")
+        .body(Full::new(Bytes::from_static(bytes)))
+        .expect("icon")
+}
+
 fn html_response(body: String) -> Response<Full<Bytes>> {
     Response::builder()
         .status(StatusCode::OK)
@@ -351,12 +453,13 @@ fn html_response(body: String) -> Response<Full<Bytes>> {
 
 fn page(title: &str, body: &str) -> String {
     format!(
-        r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>{title} — fortibackup</title><link rel="stylesheet" href="/style.css"></head>
+        r##"<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{title} — fortibackup</title><link rel="stylesheet" href="/style.css"><link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials"><meta name="theme-color" content="#001F5B"><link rel="icon" type="image/png" href="/icon-192.png"><link rel="apple-touch-icon" href="/icon-192.png"></head>
 <body>
 <header><div><a href="/">fortibackup</a> · {title}</div><div class="version">v{ver}</div></header>
 {body}
-</body></html>"#,
+<script>if('serviceWorker' in navigator){{navigator.serviceWorker.register('/sw.js').catch(function(){{}});}}</script>
+</body></html>"##,
         title = html_escape(title),
         ver = env!("CARGO_PKG_VERSION"),
         body = body

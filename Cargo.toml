@@ -1,6 +1,6 @@
 [package]
 name = "fortibackup"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2021"
 # Documented target only; not CI-gated. The aws-sdk-s3 dependency tree tracks
 # recent stable, so pinning a low MSRV isn't maintainable — CI tests `stable`.

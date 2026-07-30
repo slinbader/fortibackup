@@ -1,3 +1,15 @@
+fortibackup (0.8.1-1) unstable; urgency=medium
+
+  * feat(webui): the Web UI is now an installable PWA. Adds a web app
+    manifest (/manifest.webmanifest), embedded 192/512 + maskable icons and
+    a service worker (/sw.js). The UI can be installed as a standalone app
+    and opens offline from a cached app shell; navigations are network-first
+    so fresh backup state is always shown when online. The manifest link uses
+    crossorigin="use-credentials" so it works behind HTTP Basic auth. Install
+    as an app requires a secure context (HTTPS or localhost).
+
+ -- Luis Herrera <luis.herrera@rnpn.gob.sv>  Fri, 10 Jul 2026 12:00:00 +0000
+
 fortibackup (0.7.0-1) unstable; urgency=medium
 
   * feat(webui): monthly backup report at GET /report, meant as evidence for
